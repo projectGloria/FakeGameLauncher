@@ -1,0 +1,4761 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.IO.Pipes;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+namespace DiscordQuestLauncher
+{
+    public static class Program
+    {
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern bool SetWindowText(IntPtr hWnd, string lpString);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern bool DestroyIcon(IntPtr handle);
+
+        [DllImport("uxtheme.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+        public static extern int SetWindowTheme(IntPtr hWnd, string pszSubAppName, string pszSubIdList);
+
+        public static void EnableImmersiveDarkMode(IntPtr handle)
+        {
+            try
+            {
+                int darkMode = 1;
+                // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE on Windows 10 20H1+ and Windows 11
+                int hr = DwmSetWindowAttribute(handle, 20, ref darkMode, sizeof(int));
+                if (hr != 0)
+                {
+                    // 19 was used on Windows 10 build 1809 - 1909
+                    DwmSetWindowAttribute(handle, 19, ref darkMode, sizeof(int));
+                }
+            }
+            catch { }
+        }
+
+        public static GraphicsPath GetRoundedPath(Rectangle rect, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            if (rect.Width <= 0 || rect.Height <= 0) return path;
+
+            int d = radius * 2;
+            if (d > rect.Width) d = rect.Width;
+            if (d > rect.Height) d = rect.Height;
+
+            path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+            path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+            path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+            path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        public static void LogError(string context, Exception ex)
+        {
+            if (ex == null) return;
+            try
+            {
+                string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiscordQuestLauncher");
+                if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
+                string logPath = Path.Combine(logDir, "launcher.log");
+                string entry = string.Format("[{0:yyyy-MM-dd HH:mm:ss}] [{1}] {2}\n{3}\n\n",
+                    DateTime.Now, context ?? "General", ex.Message, ex.ToString());
+                File.AppendAllText(logPath, entry);
+            }
+            catch { }
+        }
+
+        [STAThread]
+        public static void Main(string[] args)
+        {
+            try
+            {
+                // Set TLS 1.2 first (always safe on .NET 4.5+)
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            }
+            catch { }
+            try
+            {
+                // Try adding TLS 1.3 (only available on .NET 4.8+ / Windows 11+)
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288;
+            }
+            catch { }
+
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                try
+                {
+                    Exception ex = e.ExceptionObject as Exception;
+                    LogError("UnhandledException", ex ?? new Exception(e.ExceptionObject.ToString()));
+                }
+                catch { }
+            };
+            Application.ThreadException += (s, e) =>
+            {
+                try
+                {
+                    LogError("ThreadException", e.Exception);
+                }
+                catch { }
+            };
+
+            try
+            {
+                Application.Run(new MainForm(args));
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    LogError("MainCatch", ex);
+                }
+                catch { }
+            }
+        }
+    }
+
+    #region Color Palette
+
+    public static class Theme
+    {
+        // Background layers
+        public static readonly Color BgDeep        = Color.FromArgb(10, 10, 15);
+        public static readonly Color BgBase        = Color.FromArgb(22, 23, 32);
+        public static readonly Color BgCard        = Color.FromArgb(34, 35, 47);
+        public static readonly Color BgElevated    = Color.FromArgb(42, 43, 58);
+        public static readonly Color BgInput       = Color.FromArgb(24, 25, 34);
+
+        // Borders
+        public static readonly Color BorderSubtle  = Color.FromArgb(42, 43, 58);
+        public static readonly Color BorderMedium  = Color.FromArgb(55, 56, 75);
+        public static readonly Color BorderFocus   = Color.FromArgb(88, 101, 242);
+
+        // Text
+        public static readonly Color TextBright    = Color.FromArgb(248, 250, 252);
+        public static readonly Color TextPrimary   = Color.FromArgb(241, 245, 249);
+        public static readonly Color TextSecondary = Color.FromArgb(148, 163, 184);
+        public static readonly Color TextMuted     = Color.FromArgb(100, 116, 139);
+        public static readonly Color TextDim       = Color.FromArgb(71, 85, 105);
+
+        // Accents
+        public static readonly Color AccentPrimary = Color.FromArgb(88, 101, 242);
+        public static readonly Color AccentHover   = Color.FromArgb(71, 82, 196);
+        public static readonly Color AccentPressed = Color.FromArgb(60, 69, 165);
+        public static readonly Color AccentPurple  = Color.FromArgb(124, 58, 237);
+        public static readonly Color AccentGreen   = Color.FromArgb(74, 222, 128);
+        public static readonly Color AccentCyan    = Color.FromArgb(34, 211, 238);
+        public static readonly Color AccentYellow  = Color.FromArgb(250, 204, 21);
+        public static readonly Color AccentRed     = Color.FromArgb(239, 68, 68);
+        public static readonly Color AccentRedBg   = Color.FromArgb(40, 20, 20);
+        public static readonly Color AccentRedBorder = Color.FromArgb(80, 30, 30);
+
+        // Gradient helpers
+        public static readonly Color GradientStart = Color.FromArgb(88, 101, 242);
+        public static readonly Color GradientEnd   = Color.FromArgb(124, 58, 237);
+
+        public static Color GetSafeParentBackground(Control c, Color fallback)
+        {
+            if (c == null) return fallback;
+            Control p = c.Parent;
+            while (p != null)
+            {
+                if (p.BackColor != Color.Transparent && p.BackColor != Color.Empty)
+                {
+                    return p.BackColor;
+                }
+                p = p.Parent;
+            }
+            return fallback;
+        }
+    }
+
+    #endregion
+
+    #region Data Models & Engine
+
+    public class GameItem
+    {
+        public string id { get; set; }
+        public string name { get; set; }
+        public string icon { get; set; }
+        public string exe { get; set; }
+
+        [ScriptIgnore]
+        public string NameLower { get; set; }
+        [ScriptIgnore]
+        public string NameNorm { get; set; }
+        [ScriptIgnore]
+        public string ExeLower { get; set; }
+        [ScriptIgnore]
+        public string ExeNorm { get; set; }
+        [ScriptIgnore]
+        public string Initials { get; set; }
+
+        public void PrecomputeSearchFields()
+        {
+            string n = name ?? "";
+            NameLower = n.ToLowerInvariant();
+            NameNorm = GameDatabase.NormalizeString(n);
+            string e = exe ?? "";
+            ExeLower = e.ToLowerInvariant();
+            ExeNorm = GameDatabase.NormalizeString(e);
+            Initials = GameDatabase.GetInitials(n);
+        }
+
+        public string GetIconUrl(int size = 64)
+        {
+            if (string.IsNullOrEmpty(icon) || string.IsNullOrEmpty(id)) return null;
+            return string.Format("https://cdn.discordapp.com/app-icons/{0}/{1}.png?size={2}", id, icon, size);
+        }
+
+        public override string ToString()
+        {
+            return name ?? exe ?? "Unknown Game";
+        }
+    }
+
+    public class QualifiedGameEntry
+    {
+        public string id { get; set; }
+        public string name { get; set; }
+        public string icon { get; set; }
+        public string exe { get; set; }
+        public int total_seconds_played { get; set; }
+        public string last_played { get; set; }
+    }
+
+    public class GameCacheData
+    {
+        public string updated_at { get; set; }
+        public List<GameItem> games { get; set; }
+    }
+
+    public class DiscordRpcClient : IDisposable
+    {
+        private NamedPipeClientStream _pipe;
+        private readonly string _clientId;
+        private bool _connected;
+        private readonly object _lock = new object();
+        private static readonly int _cachedPid = Process.GetCurrentProcess().Id;
+
+        public DiscordRpcClient(string clientId)
+        {
+            _clientId = clientId;
+        }
+
+        public bool IsConnected
+        {
+            get { return _connected && _pipe != null && _pipe.IsConnected; }
+        }
+
+        public bool Connect(int timeoutMs = 1000)
+        {
+            if (string.IsNullOrEmpty(_clientId)) return false;
+            for (int i = 0; i < 10; i++)
+            {
+                NamedPipeClientStream pipe = null;
+                try
+                {
+                    pipe = new NamedPipeClientStream(".", "discord-ipc-" + i, PipeDirection.InOut);
+                    pipe.Connect(timeoutMs);
+                    pipe.ReadMode = PipeTransmissionMode.Byte;
+                    _pipe = pipe;
+                    pipe = null; // prevent dispose below since _pipe now owns it
+                    if (SendHandshake())
+                    {
+                        _connected = true;
+                        return true;
+                    }
+                    // Handshake rejected, close this pipe
+                    try { _pipe.Dispose(); } catch { }
+                    _pipe = null;
+                }
+                catch
+                {
+                    if (pipe != null)
+                    {
+                        try { pipe.Dispose(); } catch { }
+                    }
+                }
+            }
+            return false;
+        }
+
+        private void ReadExact(byte[] buffer, int offset, int count, int timeoutMs = 5000)
+        {
+            if (_pipe == null) throw new IOException("Pipe is null");
+            try { _pipe.ReadTimeout = timeoutMs; } catch { }
+            while (count > 0)
+            {
+                int n = _pipe.Read(buffer, offset, count);
+                if (n == 0) throw new IOException("Pipe closed");
+                offset += n;
+                count -= n;
+            }
+        }
+
+        private void SendPacket(int opcode, string json)
+        {
+            if (_pipe == null || !_pipe.IsConnected) return;
+            byte[] payload = Encoding.UTF8.GetBytes(json);
+            byte[] header = new byte[8];
+            BitConverter.GetBytes(opcode).CopyTo(header, 0);
+            BitConverter.GetBytes(payload.Length).CopyTo(header, 4);
+            _pipe.Write(header, 0, 8);
+            _pipe.Write(payload, 0, payload.Length);
+            _pipe.Flush();
+        }
+
+        /// <summary>Reads one full frame from the pipe. Returns the opcode, or -1 on failure.</summary>
+        private int ReadFrame()
+        {
+            try
+            {
+                byte[] header = new byte[8];
+                ReadExact(header, 0, 8);
+                int opcode = BitConverter.ToInt32(header, 0);
+                int len = BitConverter.ToInt32(header, 4);
+                if (len > 0 && len < 65536)
+                {
+                    byte[] buf = new byte[len];
+                    ReadExact(buf, 0, len);
+                }
+                return opcode;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>Drains any pending response frames so the pipe buffer doesn't fill up.</summary>
+        private void DrainResponses()
+        {
+            try
+            {
+                // Quick non-blocking check: set a very short timeout
+                try { _pipe.ReadTimeout = 1; } catch { }
+                byte[] probe = new byte[8];
+                while (_pipe != null && _pipe.IsConnected)
+                {
+                    int n = 0;
+                    try { n = _pipe.Read(probe, 0, 8); } catch { break; }
+                    if (n == 0) break;
+                    if (n == 8)
+                    {
+                        int len = BitConverter.ToInt32(probe, 4);
+                        if (len > 0 && len < 65536)
+                        {
+                            byte[] discard = new byte[len];
+                            try { ReadExact(discard, 0, len, 1000); } catch { break; }
+                        }
+                    }
+                    else break;
+                }
+            }
+            catch { }
+        }
+
+        private bool SendHandshake()
+        {
+            // Validate client_id is safe (should be numeric Discord app ID)
+            foreach (char c in _clientId)
+            {
+                if (!char.IsDigit(c)) return false;
+            }
+            string json = "{\"v\":1,\"client_id\":\"" + _clientId + "\"}";
+            SendPacket(0, json);
+            int opcode = ReadFrame();
+            // Opcode 1 = FRAME (success), Opcode 2 = CLOSE (rejected)
+            return opcode == 1;
+        }
+
+        public void SetActivity(string details, string state, string largeImageKey, string largeImageText, long startEpoch)
+        {
+            if (!IsConnected) return;
+            lock (_lock)
+            {
+                try
+                {
+                    // Drain any pending responses to prevent pipe buffer from filling
+                    DrainResponses();
+
+                    var act = new Dictionary<string, object>
+                    {
+                        { "cmd", "SET_ACTIVITY" },
+                        { "args", new Dictionary<string, object>
+                            {
+                                { "pid", _cachedPid },
+                                { "activity", new Dictionary<string, object>
+                                    {
+                                        { "details", details ?? "" },
+                                        { "state", state ?? "" },
+                                        { "timestamps", new Dictionary<string, object> { { "start", startEpoch } } },
+                                        { "assets", new Dictionary<string, object>
+                                            {
+                                                { "large_image", largeImageKey ?? "" },
+                                                { "large_text", largeImageText ?? "" }
+                                            }
+                                        },
+                                        { "instance", true }
+                                    }
+                                }
+                            }
+                        },
+                        { "nonce", Guid.NewGuid().ToString() }
+                    };
+                    JavaScriptSerializer ser = new JavaScriptSerializer();
+                    string json = ser.Serialize(act);
+                    SendPacket(1, json);
+                }
+                catch { }
+            }
+        }
+
+        public void ClearActivity()
+        {
+            if (!IsConnected) return;
+            lock (_lock)
+            {
+                try
+                {
+                    var act = new Dictionary<string, object>
+                    {
+                        { "cmd", "SET_ACTIVITY" },
+                        { "args", new Dictionary<string, object>
+                            {
+                                { "pid", _cachedPid },
+                                { "activity", null }
+                            }
+                        },
+                        { "nonce", Guid.NewGuid().ToString() }
+                    };
+                    JavaScriptSerializer ser = new JavaScriptSerializer();
+                    string json = ser.Serialize(act);
+                    SendPacket(1, json);
+                }
+                catch { }
+            }
+        }
+
+        public void Dispose()
+        {
+            _connected = false;
+            try { ClearActivity(); } catch { }
+            try
+            {
+                if (_pipe != null)
+                {
+                    _pipe.Close();
+                    _pipe.Dispose();
+                    _pipe = null;
+                }
+            }
+            catch { }
+        }
+    }
+
+    public class GameDatabase
+    {
+        private static GameDatabase _instance;
+        public static GameDatabase Instance
+        {
+            get
+            {
+                if (_instance == null) _instance = new GameDatabase();
+                return _instance;
+            }
+        }
+
+        private List<GameItem> _games = new List<GameItem>();
+        private readonly object _lock = new object();
+        private bool _isUpdating = false;
+
+        public event Action OnDatabaseUpdated;
+        public event Action OnQualifiedGamesChanged;
+
+        public int Count
+        {
+            get { lock (_lock) return _games.Count; }
+        }
+
+        public bool IsUpdating
+        {
+            get { return _isUpdating; }
+        }
+
+        public string CacheDirectory
+        {
+            get
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiscordQuestLauncher");
+                if (!Directory.Exists(dir))
+                {
+                    try { Directory.CreateDirectory(dir); } catch { }
+                }
+                return dir;
+            }
+        }
+
+        public string CacheFilePath
+        {
+            get { return Path.Combine(CacheDirectory, "games_cache.json"); }
+        }
+
+        public string QualifiedGamesFilePath
+        {
+            get { return Path.Combine(CacheDirectory, "qualified_games.json"); }
+        }
+
+        public string CustomGamesFilePath
+        {
+            get { return Path.Combine(CacheDirectory, "custom_games.json"); }
+        }
+
+        private List<GameItem> _customGames = new List<GameItem>();
+
+        public void LoadCustomGames()
+        {
+            try
+            {
+                string path = CustomGamesFilePath;
+                if (!File.Exists(path))
+                {
+                    path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "custom_games.json");
+                }
+                if (File.Exists(path))
+                {
+                    string text = File.ReadAllText(path);
+                    JavaScriptSerializer ser = new JavaScriptSerializer();
+                    List<GameItem> items = ser.Deserialize<List<GameItem>>(text);
+                    if (items != null && items.Count > 0)
+                    {
+                        lock (_lock)
+                        {
+                            _customGames = items;
+                            foreach (GameItem cg in items)
+                            {
+                                if (cg == null || string.IsNullOrWhiteSpace(cg.name)) continue;
+                                cg.PrecomputeSearchFields();
+
+                                GameItem existing = _games.Find(x => string.Equals(x.name, cg.name, StringComparison.OrdinalIgnoreCase) ||
+                                                                    (!string.IsNullOrEmpty(x.id) && x.id == cg.id));
+                                if (existing != null)
+                                {
+                                    if (string.IsNullOrEmpty(cg.id)) cg.id = existing.id;
+                                    if (string.IsNullOrEmpty(cg.icon)) cg.icon = existing.icon;
+                                    if (string.IsNullOrEmpty(cg.exe)) cg.exe = existing.exe;
+                                }
+
+                                _games.RemoveAll(x => string.Equals(x.name, cg.name, StringComparison.OrdinalIgnoreCase) ||
+                                                      (!string.IsNullOrEmpty(x.id) && x.id == cg.id));
+                                _games.Insert(0, cg);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public void AddCustomGame(GameItem game)
+        {
+            if (game == null || string.IsNullOrWhiteSpace(game.name)) return;
+            game.PrecomputeSearchFields();
+            lock (_lock)
+            {
+                GameItem existing = _games.Find(x => string.Equals(x.name, game.name, StringComparison.OrdinalIgnoreCase));
+                if (existing != null)
+                {
+                    if (string.IsNullOrEmpty(game.id)) game.id = existing.id;
+                    if (string.IsNullOrEmpty(game.icon)) game.icon = existing.icon;
+                }
+
+                _customGames.RemoveAll(x => string.Equals(x.name, game.name, StringComparison.OrdinalIgnoreCase));
+                _customGames.Insert(0, game);
+
+                _games.RemoveAll(x => string.Equals(x.name, game.name, StringComparison.OrdinalIgnoreCase));
+                _games.Insert(0, game);
+
+                try
+                {
+                    JavaScriptSerializer ser = new JavaScriptSerializer();
+                    string json = ser.Serialize(_customGames);
+                    File.WriteAllText(CustomGamesFilePath, json, Encoding.UTF8);
+                    try
+                    {
+                        string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "custom_games.json");
+                        File.WriteAllText(localPath, json, Encoding.UTF8);
+                    }
+                    catch { }
+                }
+                catch { }
+            }
+
+            if (OnDatabaseUpdated != null)
+            {
+                try { OnDatabaseUpdated(); } catch { }
+            }
+        }
+
+        public void Initialize()
+        {
+            bool loaded = false;
+
+            // 1. Try AppData cache file
+            if (File.Exists(CacheFilePath))
+            {
+                loaded = LoadCacheFromFile(CacheFilePath);
+            }
+
+            // 2. Try application directory cache file if not loaded or empty
+            string localCache = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "games_cache.json");
+            if (!loaded || Count == 0)
+            {
+                if (File.Exists(localCache))
+                {
+                    bool localLoaded = LoadCacheFromFile(localCache);
+                    if (localLoaded)
+                    {
+                        loaded = true;
+                        try { File.Copy(localCache, CacheFilePath, true); } catch { }
+                    }
+                }
+            }
+
+            // 3. Try seed abc.json in application directory if still not loaded or empty
+            if (!loaded || Count == 0)
+            {
+                string seedFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "abc.json");
+                if (File.Exists(seedFile))
+                {
+                    try
+                    {
+                        string seedText = File.ReadAllText(seedFile);
+                        List<GameItem> seedItems = ParseDetectableApplications(seedText);
+                        if (seedItems != null && seedItems.Count > 0)
+                        {
+                            lock (_lock) _games = seedItems;
+                            SaveCache(seedItems);
+                            loaded = true;
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            // Load user's custom games
+            LoadCustomGames();
+
+            // 4. Check 7-day expiration
+            bool needsRefresh = false;
+            if (!loaded || Count == 0)
+            {
+                needsRefresh = true;
+            }
+            else
+            {
+                try
+                {
+                    if (File.Exists(CacheFilePath))
+                    {
+                        DateTime lastMod = File.GetLastWriteTimeUtc(CacheFilePath);
+                        if ((DateTime.UtcNow - lastMod).TotalDays >= 7)
+                        {
+                            needsRefresh = true;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (needsRefresh)
+            {
+                RefreshFromDiscordAsync();
+            }
+        }
+
+        private bool LoadCacheFromFile(string path)
+        {
+            try
+            {
+                string text = File.ReadAllText(path);
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                ser.MaxJsonLength = int.MaxValue;
+                GameCacheData data = ser.Deserialize<GameCacheData>(text);
+                if (data != null && data.games != null && data.games.Count > 0)
+                {
+                    foreach (var g in data.games)
+                    {
+                        if (g != null) g.PrecomputeSearchFields();
+                    }
+                    lock (_lock) _games = data.games;
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public void SaveCache(List<GameItem> items)
+        {
+            try
+            {
+                GameCacheData cache = new GameCacheData
+                {
+                    updated_at = DateTime.UtcNow.ToString("o"),
+                    games = items
+                };
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                ser.MaxJsonLength = int.MaxValue;
+                string json = ser.Serialize(cache);
+
+                File.WriteAllText(CacheFilePath, json, Encoding.UTF8);
+
+                string localCache = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "games_cache.json");
+                try { File.WriteAllText(localCache, json, Encoding.UTF8); } catch { }
+            }
+            catch { }
+        }
+
+        public void RefreshFromDiscordAsync()
+        {
+            if (_isUpdating) return;
+            _isUpdating = true;
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    using (WebClient wc = new WebClient())
+                    {
+                        wc.Headers[HttpRequestHeader.UserAgent] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DiscordQuestLauncher/2.0";
+                        string json = wc.DownloadString("https://discord.com/api/v9/applications/detectable");
+                        List<GameItem> parsed = ParseDetectableApplications(json);
+                        if (parsed != null && parsed.Count > 0)
+                        {
+                            lock (_lock)
+                            {
+                                _games = parsed;
+                            }
+                            SaveCache(parsed);
+                            LoadCustomGames();
+                        }
+                    }
+                }
+                catch
+                {
+                    lock (_lock)
+                    {
+                        if (_games.Count == 0)
+                        {
+                            string seedFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "abc.json");
+                            if (File.Exists(seedFile))
+                            {
+                                try
+                                {
+                                    string seedText = File.ReadAllText(seedFile);
+                                    _games = ParseDetectableApplications(seedText);
+                                    SaveCache(_games);
+                                    LoadCustomGames();
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    _isUpdating = false;
+                    if (OnDatabaseUpdated != null)
+                    {
+                        try { OnDatabaseUpdated(); } catch { }
+                    }
+                }
+            });
+        }
+
+        public static string InferExecutableFromName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "game.exe";
+            string n = name.Trim();
+
+            // EA Sports UFC series
+            Match m = Regex.Match(n, @"(?:EA\s*Sports\s*)?UFC\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "ufc" + m.Groups[1].Value + ".exe";
+            if (Regex.IsMatch(n, @"(?:EA\s*Sports\s*)?UFC$", RegexOptions.IgnoreCase)) return "ufc.exe";
+
+            // EA Sports FC (e.g. EA Sports FC 24, 25, 26, 27, 28)
+            m = Regex.Match(n, @"\b(?:EA\s*Sports\s+)?FC\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "fc" + m.Groups[1].Value + ".exe";
+
+            // FIFA series (FIFA 14, 15, 16, etc.)
+            m = Regex.Match(n, @"FIFA\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "fifa" + m.Groups[1].Value + ".exe";
+
+            // College Football
+            m = Regex.Match(n, @"College\s*Football\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "cfb" + m.Groups[1].Value + ".exe";
+
+            // Madden NFL
+            m = Regex.Match(n, @"Madden\s*NFL\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "madden" + m.Groups[1].Value + ".exe";
+
+            // NBA 2K
+            m = Regex.Match(n, @"NBA\s*2K(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "nba2k" + m.Groups[1].Value + ".exe";
+
+            // F1 series
+            m = Regex.Match(n, @"F1\s*(20\d\d|\d\d)", RegexOptions.IgnoreCase);
+            if (m.Success) return "f1_" + m.Groups[1].Value + ".exe";
+
+            // WWE 2K
+            m = Regex.Match(n, @"WWE\s*2K(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "wwe2k" + m.Groups[1].Value + ".exe";
+
+            // NHL series
+            m = Regex.Match(n, @"NHL\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "nhl" + m.Groups[1].Value + ".exe";
+
+            // Call of Duty
+            m = Regex.Match(n, @"Call\s*of\s*Duty.*Black\s*Ops\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "BlackOps" + m.Groups[1].Value + ".exe";
+            m = Regex.Match(n, @"Call\s*of\s*Duty.*Modern\s*Warfare\s*(\d+)", RegexOptions.IgnoreCase);
+            if (m.Success) return "ModernWarfare" + m.Groups[1].Value + ".exe";
+
+            // General sanitized name
+            string clean = Regex.Replace(n, @"[^\w]", "");
+            if (!string.IsNullOrEmpty(clean))
+            {
+                return clean + ".exe";
+            }
+
+            return "game.exe";
+        }
+
+        public static List<GameItem> ParseDetectableApplications(string json)
+        {
+            JavaScriptSerializer ser = new JavaScriptSerializer();
+            ser.MaxJsonLength = int.MaxValue;
+            object[] rawList = ser.DeserializeObject(json) as object[];
+            if (rawList == null) return new List<GameItem>();
+
+            List<GameItem> result = new List<GameItem>(rawList.Length / 2);
+
+            foreach (object rawObj in rawList)
+            {
+                Dictionary<string, object> item = rawObj as Dictionary<string, object>;
+                if (item == null) continue;
+
+                string gameTitle = item.ContainsKey("name") && item["name"] != null ? item["name"].ToString().Trim() : "";
+                if (string.IsNullOrEmpty(gameTitle)) continue;
+
+                string cleanTitle = Regex.Replace(gameTitle ?? "", @"[^\w]", "").ToLowerInvariant();
+
+                string bestExe = null;
+                int bestScore = -1000;
+
+                if (item.ContainsKey("executables"))
+                {
+                    object[] exes = item["executables"] as object[];
+                    if (exes != null && exes.Length > 0)
+                    {
+                        foreach (object exeRaw in exes)
+                        {
+                            Dictionary<string, object> exeObj = exeRaw as Dictionary<string, object>;
+                            if (exeObj == null) continue;
+
+                            if (!exeObj.ContainsKey("os") || !object.Equals(exeObj["os"], "win32")) continue;
+                            if (!exeObj.ContainsKey("name") || exeObj["name"] == null) continue;
+
+                            string rawName = exeObj["name"].ToString().Trim().TrimStart('>').Replace('\\', '/');
+                            int slash = rawName.LastIndexOf('/');
+                            string cleanExe = slash >= 0 ? rawName.Substring(slash + 1) : rawName;
+                            if (string.IsNullOrWhiteSpace(cleanExe)) continue;
+
+                            bool isLauncher = exeObj.ContainsKey("is_launcher") && object.Equals(exeObj["is_launcher"], true);
+                            int score = 100;
+                            if (isLauncher) score -= 50;
+
+                            string lower = cleanExe.ToLowerInvariant();
+                            if (lower.Contains("_be") || lower.Contains("_eac") || lower.Contains("easyanticheat") ||
+                                lower.Contains("battleye") || lower.Contains("crash") || lower.Contains("unins") ||
+                                lower.Contains("server") || lower.Contains("dedicated") || lower.Contains("editor") ||
+                                lower.Contains("tools") || lower.Contains("patcher") || lower.Contains("updater") ||
+                                lower.Contains("diagnostic") || lower.Contains("report"))
+                            {
+                                score -= 40;
+                            }
+
+                            if (lower.Contains("trial") || lower.Contains("demo") || lower.Contains("beta") ||
+                                lower.Contains("playtest") || lower.Contains("showcase") || lower.Contains("benchmark"))
+                            {
+                                score -= 30;
+                            }
+
+                            string cleanExeNoExt = Path.GetFileNameWithoutExtension(cleanExe).ToLowerInvariant().Replace(" ", "").Replace("_", "").Replace("-", "");
+                            if (cleanTitle.Length >= 3 && cleanExeNoExt.Contains(cleanTitle))
+                            {
+                                score += 35;
+                            }
+                            if (lower.Contains("shipping") || lower.Contains("vulkan") || lower.Contains("dx11") || lower.Contains("dx12") || lower.Contains("x64"))
+                            {
+                                score += 5;
+                            }
+
+                            if (score > bestScore)
+                            {
+                                bestScore = score;
+                                bestExe = cleanExe;
+                            }
+                        }
+                    }
+                }
+
+                if (string.IsNullOrEmpty(bestExe))
+                {
+                    bestExe = InferExecutableFromName(gameTitle);
+                }
+
+                if (!string.IsNullOrEmpty(bestExe))
+                {
+                    string id = item.ContainsKey("id") && item["id"] != null ? item["id"].ToString() : "";
+                    string icon = "";
+                    if (item.ContainsKey("icon_hash") && item["icon_hash"] != null) icon = item["icon_hash"].ToString();
+                    else if (item.ContainsKey("icon") && item["icon"] != null) icon = item["icon"].ToString();
+
+                    GameItem gi = new GameItem
+                    {
+                        id = id,
+                        name = gameTitle,
+                        icon = icon,
+                        exe = bestExe
+                    };
+                    gi.PrecomputeSearchFields();
+                    result.Add(gi);
+                }
+            }
+
+            return result;
+        }
+
+        public static string NormalizeString(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringBuilder sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (char.IsLetterOrDigit(c))
+                {
+                    sb.Append(char.ToLowerInvariant(c));
+                }
+            }
+            return sb.ToString();
+        }
+
+        public static string GetInitials(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringBuilder sb = new StringBuilder();
+            bool inWord = false;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (char.IsLetterOrDigit(c))
+                {
+                    if (!inWord)
+                    {
+                        sb.Append(char.ToLowerInvariant(c));
+                        inWord = true;
+                    }
+                }
+                else
+                {
+                    inWord = false;
+                }
+            }
+            return sb.ToString();
+        }
+
+        public static string CleanSearchQuery(string query)
+        {
+            if (string.IsNullOrWhiteSpace(query)) return "";
+            string s = query.Trim();
+            // Remove symbols like ™, ®, ©
+            s = Regex.Replace(s, @"[\u2122\u00ae\u00a9]", " ");
+            // Remove trailing/leading whole-word "quest" or "quests"
+            s = Regex.Replace(s, @"\bquests?\b", " ", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"\s+", " ").Trim();
+            return s;
+        }
+
+        public static List<string> ExpandAliases(string qLower)
+        {
+            List<string> list = new List<string>();
+            string clean = CleanSearchQuery(qLower).ToLowerInvariant();
+            if (string.IsNullOrEmpty(clean)) clean = qLower;
+
+            // EA Sports FC / FIFA
+            if (clean.Contains("ea fc") || clean.Contains("eafc") || clean.StartsWith("fc ") || clean.StartsWith("fifa ") || clean.Contains("fc2") || clean.Contains("fifa2"))
+            {
+                list.Add(Regex.Replace(clean, @"\bea\s*fc\b|\beafc\b", "ea sports fc").Trim());
+            }
+            Match mFifa = Regex.Match(clean, @"fifa\s*(2[4-9]|[3-9]\d)", RegexOptions.IgnoreCase);
+            if (mFifa.Success)
+            {
+                list.Add("ea sports fc " + mFifa.Groups[1].Value);
+            }
+            Match mFc = Regex.Match(clean, @"(?:^|\s)fc\s*(\d+)", RegexOptions.IgnoreCase);
+            if (mFc.Success)
+            {
+                list.Add("ea sports fc " + mFc.Groups[1].Value);
+            }
+            if (clean == "fc27" || clean == "fc 27" || clean == "ea fc 27" || clean == "eafc 27" || clean == "fifa 27" || clean == "fifa27")
+            {
+                list.Add("ea sports fc 27");
+            }
+
+            // Acronyms & Popular Names
+            if (qLower == "wuwa") list.Add("wuthering waves");
+            else if (qLower == "zzz") list.Add("zenless zone zero");
+            else if (qLower == "wwm") list.Add("where winds meet");
+            else if (qLower == "hsr") list.Add("honkai: star rail");
+            else if (qLower == "genshin") list.Add("genshin impact");
+            else if (qLower == "poe") list.Add("path of exile");
+            else if (qLower == "r6" || qLower == "siege") list.Add("rainbow six");
+            else if (qLower == "valo") list.Add("valorant");
+            else if (qLower == "ow" || qLower == "ow2") list.Add("overwatch");
+            else if (qLower == "cs" || qLower == "cs2" || qLower == "csgo") list.Add("counter-strike");
+            else if (qLower == "wf") list.Add("warframe");
+            else if (qLower == "mc") list.Add("minecraft");
+            else if (qLower == "tarkov") list.Add("escape from tarkov");
+            else if (qLower == "cod") list.Add("call of duty");
+            else if (qLower.StartsWith("cod ")) list.Add("call of duty " + qLower.Substring(4));
+            else if (qLower.StartsWith("bo") && qLower.Length > 2 && char.IsDigit(qLower[2])) list.Add("black ops " + qLower.Substring(2));
+            else if (qLower.StartsWith("mw") && qLower.Length > 2 && char.IsDigit(qLower[2])) list.Add("modern warfare " + qLower.Substring(2));
+            else if (qLower == "gta") list.Add("grand theft auto");
+            else if (qLower == "gta 5" || qLower == "gta5" || qLower == "gta v") list.Add("grand theft auto v");
+            else if (qLower == "gta 6" || qLower == "gta6" || qLower == "gta vi") list.Add("grand theft auto vi");
+            else if (qLower == "gta 4" || qLower == "gta4" || qLower == "gta iv") list.Add("grand theft auto iv");
+            else if (qLower == "gta sa") list.Add("grand theft auto: san andreas");
+            else if (qLower == "gta vc") list.Add("grand theft auto: vice city");
+            else if (qLower.StartsWith("gta ")) list.Add("grand theft auto " + qLower.Substring(4));
+            else if (qLower.StartsWith("civ ") && qLower.Length > 4 && char.IsDigit(qLower[4])) list.Add("civilization");
+
+            return list;
+        }
+
+        private class ScoredGame
+        {
+            public GameItem Game;
+            public int Score;
+            public int NameLength;
+        }
+
+        private static bool AllTokensMatch(string text, string[] tokens)
+        {
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                if (text.IndexOf(tokens[i], StringComparison.Ordinal) < 0) return false;
+            }
+            return true;
+        }
+
+        private static bool AllTokensMatchAcross(string text1, string text2, string[] tokens)
+        {
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                if (text1.IndexOf(tokens[i], StringComparison.Ordinal) < 0 &&
+                    text2.IndexOf(tokens[i], StringComparison.Ordinal) < 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        public List<GameItem> Search(string query, int limit = 50)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return new List<GameItem>();
+            }
+
+            string rawQ = query.Trim();
+            string cleanQ = CleanSearchQuery(rawQ);
+            string q = !string.IsNullOrEmpty(cleanQ) ? cleanQ : rawQ;
+            string qLower = q.ToLowerInvariant();
+            string qNorm = NormalizeString(q);
+            string spaceQ = " " + qLower;
+
+            List<string> aliases = ExpandAliases(qLower);
+            if (!string.IsNullOrEmpty(rawQ) && rawQ != q)
+            {
+                foreach (string a in ExpandAliases(rawQ.ToLowerInvariant()))
+                {
+                    if (!aliases.Contains(a)) aliases.Add(a);
+                }
+            }
+
+            string[] tokens = qLower.Split(new[] { ' ', '-', ':', '_', '.', '/', '\\', ',', '(', ')' }, StringSplitOptions.RemoveEmptyEntries);
+
+            List<ScoredGame> scored = new List<ScoredGame>();
+
+            lock (_lock)
+            {
+                for (int i = 0; i < _games.Count; i++)
+                {
+                    GameItem g = _games[i];
+                    if (g == null) continue;
+
+                    string nameLower = g.NameLower ?? (g.NameLower = (g.name ?? "").ToLowerInvariant());
+                    string nameNorm = g.NameNorm ?? (g.NameNorm = NormalizeString(g.name ?? ""));
+                    string exeLower = g.ExeLower ?? (g.ExeLower = (g.exe ?? "").ToLowerInvariant());
+                    string exeNorm = g.ExeNorm ?? (g.ExeNorm = NormalizeString(g.exe ?? ""));
+                    string initials = g.Initials ?? (g.Initials = GetInitials(g.name ?? ""));
+                    string name = g.name ?? "";
+
+                    int score = 0;
+
+                    // 1. Exact full name match
+                    if (nameLower == qLower)
+                    {
+                        score = 1000;
+                    }
+                    // 2. Exact alias match
+                    else if (aliases.Count > 0 && aliases.Contains(nameLower))
+                    {
+                        score = 980;
+                    }
+                    // 3. Exact normalized name match
+                    else if (!string.IsNullOrEmpty(qNorm) && nameNorm == qNorm)
+                    {
+                        score = 950;
+                    }
+                    // 4. Exact exe match (e.g. fc27.exe or fc27, gta5.exe)
+                    else if (exeLower == qLower || (!qLower.EndsWith(".exe") && exeLower == qLower + ".exe") || (!string.IsNullOrEmpty(qNorm) && (exeNorm == qNorm || exeNorm == qNorm + "exe")))
+                    {
+                        score = 940;
+                    }
+                    // 5. Name starts with query
+                    else if (nameLower.StartsWith(qLower, StringComparison.Ordinal))
+                    {
+                        score = 900;
+                    }
+                    // 6. Name starts with an alias
+                    else if (aliases.Count > 0 && aliases.Exists(a => nameLower.StartsWith(a, StringComparison.Ordinal) && (nameLower.Length == a.Length || !char.IsLetter(nameLower[a.Length]))))
+                    {
+                        score = 880;
+                    }
+                    // 7. Word in name starts with query
+                    else if (nameLower.IndexOf(spaceQ, StringComparison.Ordinal) >= 0)
+                    {
+                        score = 820;
+                    }
+                    // 8. Alias substring in name
+                    else if (aliases.Count > 0 && aliases.Exists(a => nameLower.IndexOf(a, StringComparison.Ordinal) >= 0))
+                    {
+                        score = 800;
+                    }
+                    // 9. All tokens present in name
+                    else if (tokens.Length > 1 && AllTokensMatch(nameLower, tokens))
+                    {
+                        score = 750;
+                    }
+                    // 10. All tokens present across name and exe
+                    else if (tokens.Length > 1 && AllTokensMatchAcross(nameLower, exeLower, tokens))
+                    {
+                        score = 700;
+                    }
+                    // 11. Normalized substring match (e.g. fc27 in easportsfc27)
+                    else if (!string.IsNullOrEmpty(qNorm) && qNorm.Length >= 3 && nameNorm.IndexOf(qNorm, StringComparison.Ordinal) >= 0)
+                    {
+                        score = 650;
+                    }
+                    // 12. Initials match (e.g. eafc matches EA Sports FC)
+                    else if (!string.IsNullOrEmpty(qNorm) && qNorm.Length >= 2 && (initials == qNorm || initials.StartsWith(qNorm, StringComparison.Ordinal)))
+                    {
+                        score = 600;
+                    }
+                    // 13. Exe starts with or contains query
+                    else if (exeLower.StartsWith(qLower, StringComparison.Ordinal))
+                    {
+                        score = 550;
+                    }
+                    else if (exeLower.IndexOf(qLower, StringComparison.Ordinal) >= 0 || (!string.IsNullOrEmpty(qNorm) && qNorm.Length >= 3 && exeNorm.IndexOf(qNorm, StringComparison.Ordinal) >= 0))
+                    {
+                        score = 500;
+                    }
+                    // 14. Substring in name
+                    else if (nameLower.IndexOf(qLower, StringComparison.Ordinal) >= 0)
+                    {
+                        score = 400;
+                    }
+
+                    if (score > 0)
+                    {
+                        scored.Add(new ScoredGame
+                        {
+                            Game = g,
+                            Score = score,
+                            NameLength = name.Length
+                        });
+                    }
+                }
+            }
+
+            // Sort by Score DESC, then NameLength ASC
+            scored.Sort((a, b) =>
+            {
+                int cmp = b.Score.CompareTo(a.Score);
+                if (cmp != 0) return cmp;
+                return a.NameLength.CompareTo(b.NameLength);
+            });
+
+            int resultCount = Math.Min(limit, scored.Count);
+            List<GameItem> results = new List<GameItem>(resultCount);
+            for (int i = 0; i < resultCount; i++)
+            {
+                results.Add(scored[i].Game);
+            }
+            return results;
+        }
+
+        public GameItem FindExactGame(string nameOrExe)
+        {
+            if (string.IsNullOrWhiteSpace(nameOrExe)) return null;
+            string raw = nameOrExe.Trim();
+            string clean = CleanSearchQuery(raw);
+            if (string.IsNullOrEmpty(clean)) clean = raw;
+            string cleanLower = clean.ToLowerInvariant();
+            string cleanNorm = NormalizeString(clean);
+            string rawNorm = NormalizeString(raw);
+
+            lock (_lock)
+            {
+                // 1. Direct name / exe match
+                foreach (GameItem g in _games)
+                {
+                    if (string.Equals(g.name, raw, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(g.name, clean, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(g.exe, raw, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(g.exe, clean, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return g;
+                    }
+                    // Try extension-stripped comparison (guarded against invalid path chars)
+                    try
+                    {
+                        if (string.Equals(Path.GetFileNameWithoutExtension(g.exe), Path.GetFileNameWithoutExtension(raw), StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(Path.GetFileNameWithoutExtension(g.exe), Path.GetFileNameWithoutExtension(clean), StringComparison.OrdinalIgnoreCase))
+                        {
+                            return g;
+                        }
+                    }
+                    catch { }
+                }
+
+                // 2. Normalized match (e.g. 'eafc27' or 'fc27' or 'ea sports fc 27')
+                if (!string.IsNullOrEmpty(cleanNorm) || !string.IsNullOrEmpty(rawNorm))
+                {
+                    foreach (GameItem g in _games)
+                    {
+                        string gNameNorm = NormalizeString(g.name);
+                        string gExeNorm = NormalizeString(g.exe);
+                        if (gNameNorm == cleanNorm || gExeNorm == cleanNorm || gNameNorm == rawNorm || gExeNorm == rawNorm)
+                        {
+                            return g;
+                        }
+                    }
+                }
+
+                // 3. Known alias search (e.g. 'ea fc 27' -> 'ea sports fc 27')
+                List<string> aliases = ExpandAliases(cleanLower);
+                if (aliases.Count > 0)
+                {
+                    foreach (GameItem g in _games)
+                    {
+                        string gLower = (g.name ?? "").ToLowerInvariant();
+                        if (aliases.Contains(gLower))
+                        {
+                            return g;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        private List<QualifiedGameEntry> _qualifiedGamesCache = null;
+
+        public static void SafeAtomicWriteText(string destinationPath, string text)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(destinationPath);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                string tempPath = destinationPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllText(tempPath, text, Encoding.UTF8);
+                if (File.Exists(destinationPath))
+                {
+                    string backupPath = destinationPath + ".bak";
+                    try { File.Copy(destinationPath, backupPath, true); } catch { }
+                }
+                File.Copy(tempPath, destinationPath, true);
+                try { File.Delete(tempPath); } catch { }
+            }
+            catch { }
+        }
+
+        public List<QualifiedGameEntry> GetQualifiedGames()
+        {
+            lock (_lock)
+            {
+                if (_qualifiedGamesCache != null)
+                {
+                    return new List<QualifiedGameEntry>(_qualifiedGamesCache);
+                }
+
+                string path = QualifiedGamesFilePath;
+                if (!File.Exists(path))
+                {
+                    path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "qualified_games.json");
+                }
+                if (File.Exists(path))
+                {
+                    // Retry up to 3 times in case another process is writing
+                    for (int retry = 0; retry < 3; retry++)
+                    {
+                        try
+                        {
+                            string text = File.ReadAllText(path);
+                            if (!string.IsNullOrWhiteSpace(text))
+                            {
+                                JavaScriptSerializer ser = new JavaScriptSerializer();
+                                List<QualifiedGameEntry> list = ser.Deserialize<List<QualifiedGameEntry>>(text);
+                                if (list != null)
+                                {
+                                    _qualifiedGamesCache = list;
+                                    return new List<QualifiedGameEntry>(list);
+                                }
+                            }
+                            break;
+                        }
+                        catch (IOException)
+                        {
+                            Thread.Sleep(50);
+                        }
+                        catch { break; }
+                    }
+                }
+                _qualifiedGamesCache = new List<QualifiedGameEntry>();
+                return new List<QualifiedGameEntry>();
+            }
+        }
+
+        public void RecordQualifiedGame(GameItem game, int sessionSeconds)
+        {
+            if (game == null || sessionSeconds < 120) return;
+            try
+            {
+                lock (_lock)
+                {
+                    List<QualifiedGameEntry> list = GetQualifiedGames();
+                    QualifiedGameEntry found = null;
+                    foreach (var item in list)
+                    {
+                        if (string.Equals(item.name, game.name, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(item.exe, game.exe, StringComparison.OrdinalIgnoreCase))
+                        {
+                            found = item;
+                            break;
+                        }
+                    }
+
+                    if (found == null)
+                    {
+                        found = new QualifiedGameEntry
+                        {
+                            id = game.id ?? "",
+                            name = game.name ?? "",
+                            icon = game.icon ?? "",
+                            exe = game.exe ?? "",
+                            total_seconds_played = sessionSeconds,
+                            last_played = DateTime.UtcNow.ToString("o")
+                        };
+                        list.Insert(0, found);
+                    }
+                    else
+                    {
+                        found.total_seconds_played += sessionSeconds;
+                        found.last_played = DateTime.UtcNow.ToString("o");
+                        if (!string.IsNullOrEmpty(game.icon)) found.icon = game.icon;
+                        if (!string.IsNullOrEmpty(game.id)) found.id = game.id;
+                        list.Remove(found);
+                        list.Insert(0, found);
+                    }
+
+                    if (list.Count > 8) list = list.GetRange(0, 8);
+                    _qualifiedGamesCache = new List<QualifiedGameEntry>(list);
+
+                    JavaScriptSerializer ser = new JavaScriptSerializer();
+                    string json = ser.Serialize(list);
+                    SafeAtomicWriteText(QualifiedGamesFilePath, json);
+
+                    try
+                    {
+                        string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "qualified_games.json");
+                        SafeAtomicWriteText(localPath, json);
+                    }
+                    catch { }
+                }
+
+                if (OnQualifiedGamesChanged != null)
+                {
+                    try { OnQualifiedGamesChanged(); } catch { }
+                }
+
+                SaveLastSimulatedGame(game);
+            }
+            catch { }
+        }
+
+        public string LastSimulatedFilePath
+        {
+            get { return Path.Combine(CacheDirectory, "last_simulated.json"); }
+        }
+
+        public GameItem GetLastSimulatedGame()
+        {
+            try
+            {
+                string path = LastSimulatedFilePath;
+                if (!File.Exists(path))
+                {
+                    path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "last_simulated.json");
+                }
+                if (File.Exists(path))
+                {
+                    string json = File.ReadAllText(path);
+                    if (!string.IsNullOrWhiteSpace(json))
+                    {
+                        JavaScriptSerializer ser = new JavaScriptSerializer();
+                        GameItem item = ser.Deserialize<GameItem>(json);
+                        if (item != null && (!string.IsNullOrEmpty(item.name) || !string.IsNullOrEmpty(item.exe)))
+                        {
+                            return item;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Fallback to the most recent game from qualified games if available
+            try
+            {
+                var qualified = GetQualifiedGames();
+                if (qualified != null && qualified.Count > 0 && qualified[0] != null)
+                {
+                    var q = qualified[0];
+                    return new GameItem
+                    {
+                        id = q.id,
+                        name = q.name,
+                        icon = q.icon,
+                        exe = q.exe
+                    };
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        public void SaveLastSimulatedGame(GameItem game)
+        {
+            if (game == null) return;
+            try
+            {
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                string json = ser.Serialize(game);
+                SafeAtomicWriteText(LastSimulatedFilePath, json);
+                try
+                {
+                    string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "last_simulated.json");
+                    SafeAtomicWriteText(localPath, json);
+                }
+                catch { }
+            }
+            catch { }
+        }
+    }
+
+    public class IconCache
+    {
+        private static IconCache _instance;
+        public static IconCache Instance
+        {
+            get
+            {
+                if (_instance == null) _instance = new IconCache();
+                return _instance;
+            }
+        }
+
+        private readonly Dictionary<string, Image> _memoryCache = new Dictionary<string, Image>();
+        private readonly HashSet<string> _inFlight = new HashSet<string>();
+        private readonly object _lock = new object();
+
+        private Image _fallbackGamepad34;
+        private Image _fallbackGamepad44;
+        private Image _fallbackGamepad54;
+
+        public string IconDirectory
+        {
+            get
+            {
+                string dir = Path.Combine(GameDatabase.Instance.CacheDirectory, "icons");
+                if (!Directory.Exists(dir))
+                {
+                    try { Directory.CreateDirectory(dir); } catch { }
+                }
+                return dir;
+            }
+        }
+
+        public Image GetIcon(GameItem game, int size, Action<Image> onLoaded = null)
+        {
+            if (game == null || string.IsNullOrEmpty(game.id) || string.IsNullOrEmpty(game.icon))
+            {
+                return GetFallbackGamepadIcon(size);
+            }
+
+            string key = string.Format("{0}_{1}_{2}", game.id, game.icon, size);
+            lock (_lock)
+            {
+                if (_memoryCache.ContainsKey(key))
+                {
+                    return _memoryCache[key];
+                }
+            }
+
+            // Check disk cache
+            string diskPath = Path.Combine(IconDirectory, string.Format("{0}_{1}.png", game.id, game.icon));
+            if (File.Exists(diskPath))
+            {
+                try
+                {
+                    byte[] bytes = File.ReadAllBytes(diskPath);
+                    using (MemoryStream ms = new MemoryStream(bytes))
+                    using (Image src = Image.FromStream(ms))
+                    {
+                        Image rounded = CreateRoundedThumbnail(src, size, 8);
+                        lock (_lock)
+                        {
+                            _memoryCache[key] = rounded;
+                        }
+                        return rounded;
+                    }
+                }
+                catch { }
+            }
+
+            // Background download
+            if (onLoaded != null)
+            {
+                lock (_lock)
+                {
+                    if (!_inFlight.Contains(key))
+                    {
+                        _inFlight.Add(key);
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            try
+                            {
+                                string url = game.GetIconUrl(size >= 44 ? 128 : 64);
+                                if (!string.IsNullOrEmpty(url))
+                                {
+                                    using (WebClient wc = new WebClient())
+                                    {
+                                        wc.Headers[HttpRequestHeader.UserAgent] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+                                        byte[] data = wc.DownloadData(url);
+                                        try { File.WriteAllBytes(diskPath, data); } catch { }
+
+                                        using (MemoryStream ms = new MemoryStream(data))
+                                        using (Image src = Image.FromStream(ms))
+                                        {
+                                            Image rounded = CreateRoundedThumbnail(src, size, 8);
+                                            lock (_lock)
+                                            {
+                                                _memoryCache[key] = rounded;
+                                                _inFlight.Remove(key);
+                                            }
+                                            onLoaded(rounded);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+
+                            // Negative cache: store fallback so we don't retry on every repaint
+                            lock (_lock)
+                            {
+                                _inFlight.Remove(key);
+                                if (!_memoryCache.ContainsKey(key))
+                                {
+                                    _memoryCache[key] = GetFallbackGamepadIcon(size);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            return GetFallbackGamepadIcon(size);
+        }
+
+        public static Bitmap CreateRoundedThumbnail(Image src, int size, int radius)
+        {
+            Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.Clear(Color.Transparent);
+
+                Rectangle rect = new Rectangle(0, 0, size, size);
+                using (GraphicsPath path = Program.GetRoundedPath(rect, radius))
+                {
+                    // Dark container background inside the rounded shape
+                    using (SolidBrush darkBg = new SolidBrush(Color.FromArgb(24, 25, 28)))
+                    {
+                        g.FillPath(darkBg, path);
+                    }
+
+                    g.SetClip(path);
+                    g.DrawImage(src, 0, 0, size, size);
+                    g.ResetClip();
+
+                    using (Pen p = new Pen(Color.FromArgb(45, 255, 255, 255), 1f))
+                    {
+                        g.DrawPath(p, path);
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        public Image GetFallbackGamepadIcon(int size)
+        {
+            if (size <= 36 && _fallbackGamepad34 != null) return _fallbackGamepad34;
+            if (size > 36 && size <= 46 && _fallbackGamepad44 != null) return _fallbackGamepad44;
+            if (size > 46 && _fallbackGamepad54 != null) return _fallbackGamepad54;
+
+            Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                Rectangle rect = new Rectangle(0, 0, size, size);
+                using (GraphicsPath clip = Program.GetRoundedPath(rect, 8))
+                {
+                    using (SolidBrush bg = new SolidBrush(Color.FromArgb(43, 45, 49)))
+                    {
+                        g.FillPath(bg, clip);
+                    }
+                    using (Pen bp = new Pen(Color.FromArgb(56, 58, 64), 1f))
+                    {
+                        g.DrawPath(bp, clip);
+                    }
+                }
+
+                float s = size / 64.0f;
+                RectangleF body = new RectangleF(8 * s, 18 * s, 48 * s, 30 * s);
+                using (GraphicsPath p = new GraphicsPath())
+                {
+                    float r = 10 * s;
+                    p.AddArc(body.X, body.Y, r * 2, r * 2, 180, 90);
+                    p.AddArc(body.Right - r * 2, body.Y, r * 2, r * 2, 270, 90);
+                    p.AddArc(body.Right - r * 2, body.Bottom - r * 2, r * 2, r * 2, 0, 90);
+                    p.AddArc(body.X, body.Bottom - r * 2, r * 2, r * 2, 90, 90);
+                    p.CloseFigure();
+
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(54, 57, 63)))
+                    {
+                        g.FillPath(b, p);
+                    }
+                    using (Pen pen = new Pen(Color.FromArgb(88, 101, 242), 1.5f * s))
+                    {
+                        g.DrawPath(pen, p);
+                    }
+                }
+
+                // D-Pad
+                using (SolidBrush btn = new SolidBrush(Color.FromArgb(219, 222, 225)))
+                {
+                    g.FillRectangle(btn, 16 * s, 31 * s, 10 * s, 4 * s);
+                    g.FillRectangle(btn, 19 * s, 28 * s, 4 * s, 10 * s);
+                }
+
+                // Action buttons
+                using (SolidBrush btn = new SolidBrush(Color.FromArgb(219, 222, 225)))
+                {
+                    float bs = 3.5f * s;
+                    g.FillEllipse(btn, 42 * s, 27 * s, bs, bs);
+                    g.FillEllipse(btn, 38 * s, 31 * s, bs, bs);
+                    g.FillEllipse(btn, 46 * s, 31 * s, bs, bs);
+                    g.FillEllipse(btn, 42 * s, 35 * s, bs, bs);
+                }
+
+                // Thumbsticks
+                using (SolidBrush thumb = new SolidBrush(Color.FromArgb(88, 101, 242)))
+                {
+                    float ts = 6 * s;
+                    g.FillEllipse(thumb, 24 * s, 34 * s, ts, ts);
+                    g.FillEllipse(thumb, 34 * s, 34 * s, ts, ts);
+                }
+            }
+
+            if (size <= 36) _fallbackGamepad34 = bmp;
+            else if (size <= 46) _fallbackGamepad44 = bmp;
+            else _fallbackGamepad54 = bmp;
+
+            return bmp;
+        }
+    }
+
+    #endregion
+
+    #region Custom Professional Controls
+
+    public class GradientPanel : Panel
+    {
+        public Color GradientColor1 { get; set; }
+        public Color GradientColor2 { get; set; }
+        public float GradientAngle { get; set; }
+        public int BorderRadius { get; set; }
+        public Color BorderColor { get; set; }
+        public float BorderWidth { get; set; }
+
+        public GradientPanel()
+        {
+            this.GradientColor1 = Theme.AccentPrimary;
+            this.GradientColor2 = Theme.AccentPurple;
+            this.GradientAngle = 135f;
+            this.BorderRadius = 6;
+            this.BorderColor = Color.Transparent;
+            this.BorderWidth = 0f;
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgBase);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath path = Program.GetRoundedPath(rect, BorderRadius))
+            {
+                using (LinearGradientBrush brush = new LinearGradientBrush(rect, GradientColor1, GradientColor2, GradientAngle))
+                {
+                    e.Graphics.FillPath(brush, path);
+                }
+
+                if (BorderWidth > 0 && BorderColor != Color.Transparent)
+                {
+                    using (Pen p = new Pen(BorderColor, BorderWidth))
+                    {
+                        e.Graphics.DrawPath(p, path);
+                    }
+                }
+            }
+        }
+    }
+
+    public class ModernCard : Panel
+    {
+        public int Radius { get; set; }
+        public Color BorderColor { get; set; }
+        public float BorderWidth { get; set; }
+        public bool ShowTopAccent { get; set; }
+        public Color AccentColor1 { get; set; }
+        public Color AccentColor2 { get; set; }
+
+        public ModernCard()
+        {
+            this.Radius = 14;
+            this.BorderColor = Theme.BorderSubtle;
+            this.BorderWidth = 1f;
+            this.ShowTopAccent = false;
+            this.AccentColor1 = Theme.AccentPrimary;
+            this.AccentColor2 = Theme.AccentPurple;
+            this.BackColor = Theme.BgCard;
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgBase);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath path = Program.GetRoundedPath(rect, Radius))
+            {
+                using (SolidBrush bgBrush = new SolidBrush(this.BackColor))
+                {
+                    e.Graphics.FillPath(bgBrush, path);
+                }
+
+                if (ShowTopAccent && Width > 4 && Height > 4)
+                {
+                    e.Graphics.SetClip(path);
+                    Rectangle accentRect = new Rectangle(0, 0, Width, 3);
+                    using (LinearGradientBrush gradBrush = new LinearGradientBrush(
+                        new Rectangle(0, 0, Width, 4), AccentColor1, AccentColor2, 0f))
+                    {
+                        e.Graphics.FillRectangle(gradBrush, accentRect);
+                    }
+                    e.Graphics.ResetClip();
+                }
+
+                if (BorderWidth > 0 && BorderColor != Color.Transparent)
+                {
+                    using (Pen borderPen = new Pen(BorderColor, BorderWidth))
+                    {
+                        e.Graphics.DrawPath(borderPen, path);
+                    }
+                }
+            }
+        }
+    }
+
+    public class RoundedCard : ModernCard
+    {
+    }
+
+    public class ModernButton : Button
+    {
+        public int BorderRadius { get; set; }
+        public Color NormalColor1 { get; set; }
+        public Color NormalColor2 { get; set; }
+        public Color HoverColor1 { get; set; }
+        public Color HoverColor2 { get; set; }
+        public Color PressedColor1 { get; set; }
+        public Color PressedColor2 { get; set; }
+        public bool UseGradient { get; set; }
+        public bool ShowShimmer { get; set; }
+
+        private bool isHovered = false;
+        private bool isPressed = false;
+        private float shimmerPos = -1f;
+        private System.Windows.Forms.Timer shimmerTimer;
+
+        public ModernButton()
+        {
+            this.UseMnemonic = false;
+            this.FlatStyle = FlatStyle.Flat;
+            this.FlatAppearance.BorderSize = 0;
+            this.Cursor = Cursors.Hand;
+            this.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+            this.ForeColor = Color.White;
+            this.BorderRadius = 12;
+            this.NormalColor1 = Theme.AccentPrimary;
+            this.NormalColor2 = Theme.AccentPurple;
+            this.HoverColor1 = Color.FromArgb(100, 113, 255);
+            this.HoverColor2 = Color.FromArgb(140, 74, 255);
+            this.PressedColor1 = Theme.AccentPressed;
+            this.PressedColor2 = Color.FromArgb(90, 40, 180);
+            this.UseGradient = true;
+            this.ShowShimmer = false;
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        public void StartShimmer()
+        {
+            if (shimmerTimer == null)
+            {
+                shimmerTimer = new System.Windows.Forms.Timer();
+                shimmerTimer.Interval = 25;
+                shimmerTimer.Tick += (s, ev) =>
+                {
+                    if (!this.IsDisposed && this.Visible && this.ShowShimmer)
+                    {
+                        Form parentForm = this.FindForm();
+                        if (parentForm != null && (parentForm.WindowState == FormWindowState.Minimized || !parentForm.Visible)) return;
+                        shimmerPos += 0.025f;
+                        if (shimmerPos > 2.5f) shimmerPos = -0.5f;
+                        this.Invalidate();
+                    }
+                };
+                shimmerTimer.Start();
+            }
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); isHovered = true; this.Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); isHovered = false; isPressed = false; this.Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); isPressed = true; this.Invalidate(); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); isPressed = false; this.Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgCard);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            Color c1, c2;
+            if (isPressed) { c1 = PressedColor1; c2 = PressedColor2; }
+            else if (isHovered) { c1 = HoverColor1; c2 = HoverColor2; }
+            else { c1 = NormalColor1; c2 = NormalColor2; }
+
+            using (GraphicsPath path = Program.GetRoundedPath(rect, BorderRadius))
+            {
+                if (UseGradient)
+                {
+                    using (LinearGradientBrush brush = new LinearGradientBrush(rect, c1, c2, 135f))
+                    {
+                        e.Graphics.FillPath(brush, path);
+                    }
+                }
+                else
+                {
+                    using (SolidBrush brush = new SolidBrush(c1))
+                    {
+                        e.Graphics.FillPath(brush, path);
+                    }
+                }
+
+                // Shimmer sweep
+                if (ShowShimmer && shimmerPos >= -0.5f)
+                {
+                    e.Graphics.SetClip(path);
+                    int shimmerWidth = Math.Max(30, Width / 3);
+                    int x = (int)(shimmerPos * (Width + shimmerWidth)) - shimmerWidth;
+                    Rectangle sRect = new Rectangle(x, 0, shimmerWidth, Height);
+                    if (sRect.Right > 0 && sRect.Left < Width)
+                    {
+                        using (LinearGradientBrush shimmerBrush = new LinearGradientBrush(
+                            sRect,
+                            Color.FromArgb(0, 255, 255, 255),
+                            Color.FromArgb(50, 255, 255, 255),
+                            LinearGradientMode.Horizontal))
+                        {
+                            e.Graphics.FillRectangle(shimmerBrush, sRect);
+                        }
+                    }
+                    e.Graphics.ResetClip();
+                }
+
+                // Hover glow border
+                if (isHovered && !isPressed)
+                {
+                    using (Pen glowPen = new Pen(Color.FromArgb(70, 255, 255, 255), 1.5f))
+                    {
+                        e.Graphics.DrawPath(glowPen, path);
+                    }
+                }
+            }
+
+            TextRenderer.DrawText(e.Graphics, this.Text, this.Font, this.ClientRectangle, this.ForeColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && shimmerTimer != null)
+            {
+                shimmerTimer.Stop();
+                shimmerTimer.Dispose();
+                shimmerTimer = null;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    public class ModernFlatButton : Button
+    {
+        public int BorderRadius { get; set; }
+        public Color NormalBg { get; set; }
+        public Color HoverBg { get; set; }
+        public Color NormalBorder { get; set; }
+        public Color HoverBorder { get; set; }
+
+        private bool isHovered = false;
+        private bool isPressed = false;
+
+        public ModernFlatButton()
+        {
+            this.UseMnemonic = false;
+            this.FlatStyle = FlatStyle.Flat;
+            this.FlatAppearance.BorderSize = 0;
+            this.Cursor = Cursors.Hand;
+            this.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            this.ForeColor = Theme.TextPrimary;
+            this.BorderRadius = 12;
+            this.NormalBg = Theme.BgElevated;
+            this.HoverBg = Color.FromArgb(53, 54, 72);
+            this.NormalBorder = Theme.BorderSubtle;
+            this.HoverBorder = Theme.BorderMedium;
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); isHovered = true; this.Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); isHovered = false; isPressed = false; this.Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); isPressed = true; this.Invalidate(); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); isPressed = false; this.Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgCard);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            Color bg = isPressed ? Color.FromArgb(35, 36, 48) : (isHovered ? HoverBg : NormalBg);
+            Color border = isHovered ? HoverBorder : NormalBorder;
+
+            using (GraphicsPath path = Program.GetRoundedPath(rect, BorderRadius))
+            {
+                using (SolidBrush bgBrush = new SolidBrush(bg))
+                {
+                    e.Graphics.FillPath(bgBrush, path);
+                }
+                using (Pen borderPen = new Pen(border, 1f))
+                {
+                    e.Graphics.DrawPath(borderPen, path);
+                }
+            }
+
+            TextRenderer.DrawText(e.Graphics, this.Text, this.Font, this.ClientRectangle, this.ForeColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    public class DangerButton : Button
+    {
+        public int BorderRadius { get; set; }
+        private bool isHovered = false;
+        private bool isPressed = false;
+
+        public DangerButton()
+        {
+            this.UseMnemonic = false;
+            this.FlatStyle = FlatStyle.Flat;
+            this.FlatAppearance.BorderSize = 0;
+            this.Cursor = Cursors.Hand;
+            this.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            this.ForeColor = Theme.AccentRed;
+            this.BorderRadius = 12;
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); isHovered = true; this.Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); isHovered = false; isPressed = false; this.Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); isPressed = true; this.Invalidate(); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); isPressed = false; this.Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgCard);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            Color bg = isPressed ? Color.FromArgb(60, 20, 20) : (isHovered ? Color.FromArgb(55, 25, 25) : Theme.AccentRedBg);
+            Color border = isHovered ? Color.FromArgb(120, 40, 40) : Theme.AccentRedBorder;
+
+            using (GraphicsPath path = Program.GetRoundedPath(rect, BorderRadius))
+            {
+                using (SolidBrush bgBrush = new SolidBrush(bg))
+                {
+                    e.Graphics.FillPath(bgBrush, path);
+                }
+                using (Pen borderPen = new Pen(border, 1f))
+                {
+                    e.Graphics.DrawPath(borderPen, path);
+                }
+            }
+
+            TextRenderer.DrawText(e.Graphics, this.Text, this.Font, this.ClientRectangle, this.ForeColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    public class SearchResultsListBox : ListBox
+    {
+        private int _hoveredIndex = -1;
+
+        public SearchResultsListBox()
+        {
+            this.DrawMode = DrawMode.OwnerDrawFixed;
+            this.ItemHeight = 52;
+            this.BackColor = Theme.BgInput;
+            this.ForeColor = Theme.TextPrimary;
+            this.BorderStyle = BorderStyle.None;
+            this.IntegralHeight = false;
+            this.Cursor = Cursors.Hand;
+            this.Font = new Font("Segoe UI", 10f);
+            this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                Program.SetWindowTheme(this.Handle, "DarkMode_Explorer", null);
+            }
+            catch { }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int index = this.IndexFromPoint(e.Location);
+            if (index != _hoveredIndex)
+            {
+                _hoveredIndex = index;
+                this.Invalidate();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _hoveredIndex = -1;
+            this.Invalidate();
+        }
+
+        protected override void OnDrawItem(DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= this.Items.Count) return;
+
+            GameItem item = this.Items[e.Index] as GameItem;
+            if (item == null) return;
+
+            bool isSelected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            bool isHovered = (e.Index == _hoveredIndex);
+
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            Color bg = Theme.BgInput;
+            if (isSelected) bg = Theme.BgElevated;
+            else if (isHovered) bg = Color.FromArgb(28, 29, 40);
+
+            using (SolidBrush b = new SolidBrush(bg))
+            {
+                g.FillRectangle(b, e.Bounds);
+            }
+
+            // Selection accent bar on left
+            if (isSelected)
+            {
+                using (SolidBrush barBrush = new SolidBrush(item.id == "__ADD_CUSTOM__" ? Theme.AccentCyan : Theme.AccentPrimary))
+                {
+                    g.FillRectangle(barBrush, e.Bounds.X, e.Bounds.Y + 6, 3, e.Bounds.Height - 12);
+                }
+            }
+
+            if (item.id == "__ADD_CUSTOM__")
+            {
+                Rectangle plusRect = new Rectangle(e.Bounds.X + 12, e.Bounds.Y + 9, 34, 34);
+                using (GraphicsPath pp = Program.GetRoundedPath(plusRect, 8))
+                {
+                    using (SolidBrush pb = new SolidBrush(Color.FromArgb(40, Theme.AccentCyan)))
+                    {
+                        g.FillPath(pb, pp);
+                    }
+                    using (Pen ppen = new Pen(Theme.AccentCyan, 1.5f))
+                    {
+                        g.DrawPath(ppen, pp);
+                    }
+                }
+                using (Font plusFont = new Font("Segoe UI", 14f, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(g, "+", plusFont, plusRect, Theme.AccentCyan,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+
+                Rectangle titleRect = new Rectangle(e.Bounds.X + 56, e.Bounds.Y + 7, e.Bounds.Width - 68, 20);
+                using (Font titleFont = new Font("Segoe UI", 10.5f, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(g, item.name, titleFont, titleRect, Theme.AccentCyan,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                }
+
+                Rectangle exeRect = new Rectangle(e.Bounds.X + 56, e.Bounds.Y + 28, e.Bounds.Width - 68, 16);
+                using (Font exeFont = new Font("Consolas", 8.5f, FontStyle.Regular))
+                {
+                    TextRenderer.DrawText(g, item.exe, exeFont, exeRect, Theme.TextSecondary,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                }
+
+                using (Pen divPen = new Pen(Color.FromArgb(25, 255, 255, 255), 1f))
+                {
+                    g.DrawLine(divPen, e.Bounds.X + 12, e.Bounds.Bottom - 1, e.Bounds.Right - 12, e.Bounds.Bottom - 1);
+                }
+                return;
+            }
+
+            // 34x34 rounded thumbnail
+            Rectangle iconRect = new Rectangle(e.Bounds.X + 12, e.Bounds.Y + 9, 34, 34);
+            Image icon = IconCache.Instance.GetIcon(item, 34, (loadedImg) =>
+            {
+                if (this.IsHandleCreated)
+                {
+                    try { this.BeginInvoke(new Action(() => this.Invalidate())); } catch { }
+                }
+            });
+
+            if (icon != null)
+            {
+                g.DrawImage(icon, iconRect);
+            }
+
+            // Game Title
+            Rectangle titleRectNormal = new Rectangle(e.Bounds.X + 56, e.Bounds.Y + 7, e.Bounds.Width - 68, 20);
+            using (Font titleFont = new Font("Segoe UI", 10.5f, FontStyle.Bold))
+            {
+                TextRenderer.DrawText(g, item.name, titleFont, titleRectNormal, Theme.TextPrimary,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            }
+
+            // Target .exe name
+            Rectangle exeRectNormal = new Rectangle(e.Bounds.X + 56, e.Bounds.Y + 28, e.Bounds.Width - 68, 16);
+            using (Font exeFont = new Font("Consolas", 8.5f, FontStyle.Regular))
+            {
+                TextRenderer.DrawText(g, item.exe, exeFont, exeRectNormal, Theme.TextMuted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            }
+
+            // Bottom divider line
+            using (Pen divPen = new Pen(Color.FromArgb(25, 255, 255, 255), 1f))
+            {
+                g.DrawLine(divPen, e.Bounds.X + 12, e.Bounds.Bottom - 1, e.Bounds.Right - 12, e.Bounds.Bottom - 1);
+            }
+        }
+    }
+
+    public class RoundedIconView : Control
+    {
+        private Image _image;
+        public Image Image
+        {
+            get { return _image; }
+            set { _image = value; this.Invalidate(); }
+        }
+
+        public int CornerRadius { get; set; }
+
+        public RoundedIconView(int radius = 12)
+        {
+            this.CornerRadius = radius;
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+            // Fill canvas with parent background color to ensure NO white corners
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgElevated);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                g.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath path = Program.GetRoundedPath(rect, CornerRadius))
+            {
+                using (SolidBrush darkBg = new SolidBrush(Color.FromArgb(20, 21, 29)))
+                {
+                    g.FillPath(darkBg, path);
+                }
+
+                if (_image != null)
+                {
+                    g.SetClip(path);
+                    g.DrawImage(_image, 0, 0, Width, Height);
+                    g.ResetClip();
+                }
+
+                using (Pen p = new Pen(Theme.BorderSubtle, 1f))
+                {
+                    g.DrawPath(p, path);
+                }
+            }
+        }
+    }
+
+    public class PlayedGamesShelfControl : Control
+    {
+        private List<QualifiedGameEntry> _entries = new List<QualifiedGameEntry>();
+        private int _hoveredIndex = -1;
+        private ToolTip _toolTip;
+
+        public event Action<GameItem> GameSelected;
+
+        public PlayedGamesShelfControl()
+        {
+            this.Size = new Size(456, 54);
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            this.Cursor = Cursors.Default;
+            _toolTip = new ToolTip();
+            _toolTip.AutoPopDelay = 5000;
+            _toolTip.InitialDelay = 150;
+            _toolTip.ReshowDelay = 100;
+        }
+
+        public void SetGames(List<QualifiedGameEntry> games)
+        {
+            _entries = games ?? new List<QualifiedGameEntry>();
+            _hoveredIndex = -1;
+            this.Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (_entries.Count == 0) return;
+
+            int newHover = -1;
+            int x = 2;
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                Rectangle tileRect = new Rectangle(x, 2, 48, 50);
+                if (tileRect.Contains(e.Location))
+                {
+                    newHover = i;
+                    break;
+                }
+                x += 56;
+                if (x > Width - 48) break;
+            }
+
+            if (newHover != _hoveredIndex)
+            {
+                _hoveredIndex = newHover;
+                this.Cursor = (_hoveredIndex >= 0) ? Cursors.Hand : Cursors.Default;
+                if (_hoveredIndex >= 0 && _hoveredIndex < _entries.Count)
+                {
+                    QualifiedGameEntry entry = _entries[_hoveredIndex];
+                    int mins = Math.Max(2, entry.total_seconds_played / 60);
+                    _toolTip.SetToolTip(this, string.Format("{0}\nPlayed: {1} mins • Click to select", entry.name, mins));
+                }
+                else
+                {
+                    _toolTip.SetToolTip(this, null);
+                }
+                this.Invalidate();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_hoveredIndex != -1)
+            {
+                _hoveredIndex = -1;
+                this.Cursor = Cursors.Default;
+                _toolTip.SetToolTip(this, null);
+                this.Invalidate();
+            }
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            base.OnMouseClick(e);
+            if (e.Button == MouseButtons.Left && _hoveredIndex >= 0 && _hoveredIndex < _entries.Count)
+            {
+                QualifiedGameEntry entry = _entries[_hoveredIndex];
+                GameItem item = new GameItem
+                {
+                    id = entry.id,
+                    name = entry.name,
+                    icon = entry.icon,
+                    exe = entry.exe
+                };
+                if (GameSelected != null)
+                {
+                    GameSelected(item);
+                }
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgCard);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                g.FillRectangle(pb, ClientRectangle);
+            }
+
+            if (_entries.Count == 0)
+            {
+                using (Font font = new Font("Segoe UI", 8.5f, FontStyle.Italic))
+                using (SolidBrush textBrush = new SolidBrush(Theme.TextDim))
+                {
+                    g.DrawString("🎮 Games simulated for 2+ mins will appear here for 1-click launch.", font, textBrush, new PointF(4, 18));
+                }
+                return;
+            }
+
+            int x = 2;
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                QualifiedGameEntry entry = _entries[i];
+                bool isHovered = (i == _hoveredIndex);
+                int yOffset = isHovered ? 2 : 4;
+                Rectangle tileRect = new Rectangle(x, yOffset, 48, 48);
+
+                using (GraphicsPath tilePath = Program.GetRoundedPath(tileRect, 12))
+                {
+                    Color tileBg1 = isHovered ? Color.FromArgb(50, 52, 70) : Theme.BgElevated;
+                    Color tileBg2 = isHovered ? Color.FromArgb(35, 36, 52) : Theme.BgCard;
+                    using (LinearGradientBrush b = new LinearGradientBrush(tileRect, tileBg1, tileBg2, 135f))
+                    {
+                        g.FillPath(b, tilePath);
+                    }
+
+                    GameItem game = new GameItem { id = entry.id, name = entry.name, icon = entry.icon, exe = entry.exe };
+                    Image icon = IconCache.Instance.GetIcon(game, 34, (loaded) =>
+                    {
+                        if (this.IsHandleCreated)
+                        {
+                            try { this.BeginInvoke(new Action(() => this.Invalidate())); } catch { }
+                        }
+                    });
+
+                    if (icon != null)
+                    {
+                        Rectangle iconRect = new Rectangle(x + 7, yOffset + 7, 34, 34);
+                        using (GraphicsPath iconClip = Program.GetRoundedPath(iconRect, 6))
+                        {
+                            g.SetClip(iconClip);
+                            g.DrawImage(icon, iconRect);
+                            g.ResetClip();
+                        }
+                    }
+
+                    Color borderColor = isHovered ? Theme.AccentPrimary : Theme.BorderMedium;
+                    using (Pen p = new Pen(borderColor, isHovered ? 1.8f : 1.2f))
+                    {
+                        g.DrawPath(p, tilePath);
+                    }
+                }
+
+                x += 56;
+                if (x > Width - 48) break;
+            }
+        }
+    }
+
+    public class StatusGlowDot : Control
+    {
+        private System.Windows.Forms.Timer _pulseTimer;
+        private float _phase = 0f;
+
+        public StatusGlowDot()
+        {
+            this.Size = new Size(16, 16);
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+
+            _pulseTimer = new System.Windows.Forms.Timer();
+            _pulseTimer.Interval = 40;
+            _pulseTimer.Tick += (s, e) =>
+            {
+                if (!this.IsDisposed && this.Visible)
+                {
+                    Form parentForm = this.FindForm();
+                    if (parentForm != null && (parentForm.WindowState == FormWindowState.Minimized || !parentForm.Visible)) return;
+                    _phase += 0.08f;
+                    if (_phase > 6.283f) _phase = 0f;
+                    this.Invalidate();
+                }
+            };
+            _pulseTimer.Start();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgCard);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            int alpha = (int)(60 + 50 * Math.Sin(_phase));
+            if (alpha < 20) alpha = 20;
+            if (alpha > 130) alpha = 130;
+
+            using (SolidBrush glow = new SolidBrush(Color.FromArgb(alpha, Theme.AccentGreen)))
+            {
+                e.Graphics.FillEllipse(glow, 1, 1, 14, 14);
+            }
+            using (SolidBrush core = new SolidBrush(Theme.AccentGreen))
+            {
+                e.Graphics.FillEllipse(core, 4, 4, 8, 8);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _pulseTimer != null)
+            {
+                _pulseTimer.Stop();
+                _pulseTimer.Dispose();
+                _pulseTimer = null;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    public class SectionLabel : Label
+    {
+        public SectionLabel(string text)
+        {
+            this.UseMnemonic = false;
+            this.Text = text.ToUpperInvariant();
+            this.Font = new Font("Segoe UI", 7.5f, FontStyle.Bold);
+            this.ForeColor = Theme.TextMuted;
+            this.BackColor = Color.Transparent;
+            this.AutoSize = true;
+        }
+    }
+
+    public class HeaderBadge : Control
+    {
+        public Color Gradient1 { get; set; }
+        public Color Gradient2 { get; set; }
+        public Color TextColor { get; set; }
+
+        public HeaderBadge(string text, Color c1, Color c2, Color textColor)
+        {
+            this.Text = text;
+            this.Gradient1 = c1;
+            this.Gradient2 = c2;
+            this.TextColor = textColor;
+            this.Font = new Font("Segoe UI", 7.5f, FontStyle.Bold);
+            this.Size = new Size(184, 24);
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgBase);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath path = Program.GetRoundedPath(rect, 6))
+            {
+                using (LinearGradientBrush brush = new LinearGradientBrush(rect, Gradient1, Gradient2, 135f))
+                {
+                    e.Graphics.FillPath(brush, path);
+                }
+            }
+
+            TextRenderer.DrawText(e.Graphics, this.Text, this.Font, this.ClientRectangle, TextColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    public class SearchBox : Panel
+    {
+        public TextBox Input { get; private set; }
+        public Label ClearButton { get; private set; }
+        public string Placeholder { get; set; }
+        public int Radius { get; set; }
+
+        public SearchBox()
+        {
+            this.Radius = 12;
+            this.Placeholder = "Search 10,000+ games (e.g. Genshin, Where Winds Meet)...";
+            this.BackColor = Theme.BgInput;
+            this.Size = new Size(456, 42);
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+
+            Input = new TextBox();
+            Input.BorderStyle = BorderStyle.None;
+            Input.BackColor = Theme.BgInput;
+            Input.ForeColor = Theme.TextPrimary;
+            Input.Font = new Font("Segoe UI", 10.5f, FontStyle.Regular);
+            Input.Location = new Point(38, 11);
+            Input.Width = this.Width - 72;
+
+            ClearButton = new Label();
+            ClearButton.Text = "✕";
+            ClearButton.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+            ClearButton.ForeColor = Theme.TextMuted;
+            ClearButton.BackColor = Theme.BgElevated;
+            ClearButton.Size = new Size(22, 22);
+            ClearButton.Cursor = Cursors.Hand;
+            ClearButton.TextAlign = ContentAlignment.MiddleCenter;
+            ClearButton.Visible = false;
+
+            ClearButton.MouseEnter += (s, e) =>
+            {
+                ClearButton.BackColor = Theme.AccentPrimary;
+                ClearButton.ForeColor = Color.White;
+            };
+            ClearButton.MouseLeave += (s, e) =>
+            {
+                ClearButton.BackColor = Theme.BgElevated;
+                ClearButton.ForeColor = Theme.TextMuted;
+            };
+
+            Input.GotFocus += (s, e) => this.Invalidate();
+            Input.LostFocus += (s, e) => this.Invalidate();
+            Input.TextChanged += (s, e) =>
+            {
+                ClearButton.Visible = !string.IsNullOrEmpty(Input.Text);
+                this.Invalidate();
+            };
+
+            this.Controls.Add(Input);
+            this.Controls.Add(ClearButton);
+            LayoutControls();
+        }
+
+        protected override void OnResize(EventArgs eventargs)
+        {
+            base.OnResize(eventargs);
+            LayoutControls();
+        }
+
+        private void LayoutControls()
+        {
+            if (Input != null)
+            {
+                Input.Location = new Point(38, (this.Height - Input.PreferredHeight) / 2);
+                Input.Width = Math.Max(50, this.Width - 72);
+            }
+            if (ClearButton != null)
+            {
+                ClearButton.Location = new Point(this.Width - 28, (this.Height - ClearButton.Height) / 2);
+            }
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            base.OnMouseClick(e);
+            if (Input != null && !Input.Focused)
+            {
+                Input.Focus();
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color parentBg = Theme.GetSafeParentBackground(this, Theme.BgCard);
+            using (SolidBrush pb = new SolidBrush(parentBg))
+            {
+                e.Graphics.FillRectangle(pb, ClientRectangle);
+            }
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath path = Program.GetRoundedPath(rect, Radius))
+            {
+                using (SolidBrush bgBrush = new SolidBrush(this.BackColor))
+                {
+                    e.Graphics.FillPath(bgBrush, path);
+                }
+
+                Color borderColor = (Input != null && Input.Focused) ? Theme.BorderFocus : Theme.BorderMedium;
+                float borderWidth = (Input != null && Input.Focused) ? 2f : 1.5f;
+
+                using (Pen borderPen = new Pen(borderColor, borderWidth))
+                {
+                    e.Graphics.DrawPath(borderPen, path);
+                }
+
+                if (Input != null && Input.Focused)
+                {
+                    using (Pen glowPen = new Pen(Color.FromArgb(40, Theme.AccentPrimary), 2f))
+                    {
+                        Rectangle glowRect = new Rectangle(1, 1, Width - 3, Height - 3);
+                        using (GraphicsPath glowPath = Program.GetRoundedPath(glowRect, Radius))
+                        {
+                            e.Graphics.DrawPath(glowPen, glowPath);
+                        }
+                    }
+                }
+            }
+
+            int iconY = (this.Height - 16) / 2;
+            using (Pen iconPen = new Pen(Theme.TextMuted, 1.6f))
+            {
+                e.Graphics.DrawEllipse(iconPen, 13, iconY + 1, 10, 10);
+                e.Graphics.DrawLine(iconPen, 21, iconY + 10, 26, iconY + 15);
+            }
+
+            if (Input != null && string.IsNullOrEmpty(Input.Text) && !Input.Focused)
+            {
+                using (Font hintFont = new Font("Segoe UI", 9.5f, FontStyle.Italic))
+                {
+                    Rectangle hintRect = new Rectangle(38, (this.Height - 20) / 2, Width - 72, 20);
+                    TextRenderer.DrawText(e.Graphics, Placeholder, hintFont, hintRect, Theme.TextDim,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                }
+            }
+        }
+    }
+
+    #endregion
+
+    public class MainForm : Form
+    {
+        private string originalLauncherPath = "";
+        private string currentExeName = "";
+        private string currentDisplayName = "";
+        private bool isSimulatingMode = false;
+        private bool isSwitchingProcesses = false;
+        private Stopwatch sessionStopwatch;
+        private System.Windows.Forms.Timer qualificationTrackerTimer;
+        private NotifyIcon trayIcon;
+        private ToolTip shelfToolTip;
+
+        // 2-minute qualification flag
+        private bool hasSaved2MinQualification = false;
+        // Prevents double/triple recording of play time at stop+close
+        private bool qualificationFinalRecorded = false;
+
+        // UI Views
+        private Panel pnlLauncher;
+        private Panel pnlActive;
+
+        // Launcher controls
+        private SearchBox searchBox;
+        private TextBox txtSearch;
+        private CheckBox chkMinimizeToTray;
+        private Panel pnlDropdown;
+        private SearchResultsListBox listResults;
+        private System.Windows.Forms.Timer debounceTimer;
+        private GameItem selectedGame;
+        private GameItem activeSimulatingGame;
+        private PlayedGamesShelfControl shelfPlayedGames;
+        private Label lblDatabaseStatus;
+        private string startupGameArg = null;
+        private bool isProgrammaticTextChange = false;
+
+        // Selected Game Card Controls
+        private ModernCard cardSelectedGame;
+        private RoundedIconView picSelectedGameIcon;
+        private Label lblSelectedGameTitle;
+        private Label lblSelectedGameExe;
+        private Label lblSelectedGameId;
+
+        // Active controls
+        private Label lblActiveGameTitle;
+        private Label lblActiveProcessInfo;
+        private Label lblSessionStartTime;
+        private RoundedIconView picActiveGameIcon;
+        private Label lblStreamHint;
+        private Label lblActiveHeaderRight;
+        private Label lblHookStatus;
+
+        // Discord RPC Presence
+        private DiscordRpcClient rpcClient;
+        private Thread rpcThread;
+        private volatile bool rpcRunning;
+        private readonly object _rpcLock = new object();
+        private int _rpcSessionId = 0;
+
+        private void EnsureDatabaseInitialized()
+        {
+            if (GameDatabase.Instance.Count == 0 && !GameDatabase.Instance.IsUpdating)
+            {
+                GameDatabase.Instance.Initialize();
+            }
+        }
+
+        public MainForm(string[] args)
+        {
+            shelfToolTip = new ToolTip();
+            shelfToolTip.AutoPopDelay = 5000;
+            shelfToolTip.InitialDelay = 300;
+            shelfToolTip.ReshowDelay = 200;
+
+            GameDatabase.Instance.OnDatabaseUpdated += OnDatabaseLoaded;
+            GameDatabase.Instance.OnQualifiedGamesChanged += OnQualifiedGamesUpdated;
+
+            InitializeCustomUI();
+
+            string procName = Process.GetCurrentProcess().ProcessName;
+            bool isRenamedBinary = !procName.Equals("GameLauncher", StringComparison.OrdinalIgnoreCase) &&
+                                   !procName.Equals("DiscordQuestLauncher", StringComparison.OrdinalIgnoreCase) &&
+                                   !procName.Equals("powershell", StringComparison.OrdinalIgnoreCase) &&
+                                   !procName.Equals("pwsh", StringComparison.OrdinalIgnoreCase);
+
+            if (args != null && args.Length >= 2 && args[0].Equals("--simulating", StringComparison.OrdinalIgnoreCase))
+            {
+                currentDisplayName = args[1];
+                originalLauncherPath = args.Length >= 3 ? args[2] : "";
+                if (args.Length >= 5)
+                {
+                    int x, y;
+                    if (int.TryParse(args[3], out x) && int.TryParse(args[4], out y) && x > -5000 && y > -5000)
+                    {
+                        this.StartPosition = FormStartPosition.Manual;
+                        this.Location = new Point(x, y);
+                    }
+                }
+                if (args.Length >= 6)
+                {
+                    chkMinimizeToTray.Checked = (args[5] == "1");
+                }
+                currentExeName = args.Length >= 7 && !string.IsNullOrEmpty(args[6]) ? args[6] : Path.GetFileName(Application.ExecutablePath);
+
+                string iconId = args.Length >= 8 ? args[7] : "";
+                string iconHash = args.Length >= 9 ? args[8] : "";
+
+                if (!string.IsNullOrEmpty(iconId))
+                {
+                    activeSimulatingGame = new GameItem { id = iconId, icon = iconHash, name = currentDisplayName, exe = currentExeName };
+                }
+                else
+                {
+                    EnsureDatabaseInitialized();
+                    activeSimulatingGame = GameDatabase.Instance.FindExactGame(currentDisplayName) ?? GameDatabase.Instance.FindExactGame(currentExeName);
+                }
+
+                SwitchToActiveMode();
+            }
+            else if (args != null && args.Length >= 1 && args[0].Equals("--launcher", StringComparison.OrdinalIgnoreCase))
+            {
+                EnsureDatabaseInitialized();
+                if (args.Length >= 3)
+                {
+                    int x, y;
+                    if (int.TryParse(args[1], out x) && int.TryParse(args[2], out y) && x > -5000 && y > -5000)
+                    {
+                        this.StartPosition = FormStartPosition.Manual;
+                        this.Location = new Point(x, y);
+                    }
+                }
+                SwitchToLauncherMode();
+            }
+            else if (isRenamedBinary)
+            {
+                // Only auto-detect if running from our known dummy directories,
+                // not from arbitrary locations (e.g. browser-renamed "GameLauncher (1).exe")
+                string exePath = Application.ExecutablePath;
+                string dummyDir = Path.Combine(Path.GetTempPath(), "DiscordDummyTools");
+                bool isInDummyDir = exePath.StartsWith(dummyDir, StringComparison.OrdinalIgnoreCase);
+                bool isInSteamCommon = exePath.IndexOf(Path.Combine("steamapps", "common"), StringComparison.OrdinalIgnoreCase) >= 0;
+
+                if (isInDummyDir || isInSteamCommon)
+                {
+                    currentDisplayName = FormatDisplayName(procName);
+                    currentExeName = Path.GetFileName(exePath);
+                    originalLauncherPath = "";
+                    EnsureDatabaseInitialized();
+                    activeSimulatingGame = GameDatabase.Instance.FindExactGame(procName);
+                    SwitchToActiveMode();
+                }
+                else
+                {
+                    EnsureDatabaseInitialized();
+                    SwitchToLauncherMode();
+                }
+            }
+            else if (args != null && args.Length >= 1 && !string.IsNullOrWhiteSpace(args[0]) && !args[0].StartsWith("--"))
+            {
+                EnsureDatabaseInitialized();
+                startupGameArg = args[0];
+                SwitchToLauncherMode();
+            }
+            else
+            {
+                EnsureDatabaseInitialized();
+                SwitchToLauncherMode();
+            }
+        }
+
+        private void OnDatabaseLoaded()
+        {
+            if (this.IsHandleCreated)
+            {
+                try
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        if (lblDatabaseStatus != null)
+                        {
+                            lblDatabaseStatus.Text = string.Format("● {0:N0} Games Loaded", GameDatabase.Instance.Count);
+                            lblDatabaseStatus.ForeColor = Theme.AccentGreen;
+                        }
+                    }));
+                }
+                catch { }
+            }
+        }
+
+        private void OnQualifiedGamesUpdated()
+        {
+            if (this.IsHandleCreated)
+            {
+                try
+                {
+                    this.BeginInvoke(new Action(() => PopulatePlayedGamesShelf()));
+                }
+                catch { }
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Program.EnableImmersiveDarkMode(this.Handle);
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            string titleToSet = isSimulatingMode ? currentDisplayName : "Discord Quest Launcher";
+            this.Text = titleToSet;
+            Program.SetWindowText(this.Handle, titleToSet);
+
+            if (!isSimulatingMode)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    if (txtSearch != null)
+                    {
+                        txtSearch.SelectionStart = txtSearch.Text.Length;
+                        txtSearch.SelectionLength = 0;
+                    }
+                    if (shelfPlayedGames != null)
+                    {
+                        this.ActiveControl = shelfPlayedGames;
+                    }
+                }));
+            }
+
+            if (!string.IsNullOrEmpty(startupGameArg))
+            {
+                string arg = startupGameArg;
+                startupGameArg = null;
+                this.BeginInvoke(new Action(() =>
+                {
+                    GameItem found = GameDatabase.Instance.FindExactGame(arg);
+                    if (found != null)
+                    {
+                        SelectGame(found);
+                        LaunchSimulation(found.exe);
+                    }
+                    else
+                    {
+                        txtSearch.Text = arg;
+                        LaunchSimulation(arg);
+                    }
+                }));
+            }
+        }
+
+        private void InitializeCustomUI()
+        {
+            this.ClientSize = new Size(520, 560);
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            this.MaximizeBox = false;
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.BackColor = Theme.BgBase;
+            this.ForeColor = Theme.TextPrimary;
+            this.Icon = CreateAppIcon();
+
+            // Rock-solid Tray Icon
+            trayIcon = new NotifyIcon();
+            trayIcon.Icon = this.Icon;
+            trayIcon.Text = "Discord Quest Launcher";
+            trayIcon.Visible = true;
+            trayIcon.MouseClick += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    RestoreFromTray();
+                }
+            };
+            trayIcon.DoubleClick += (s, e) => RestoreFromTray();
+
+            UpdateTrayContextMenu();
+
+            // Background timer ONLY for tracking the 2-minute qualification threshold
+            qualificationTrackerTimer = new System.Windows.Forms.Timer();
+            qualificationTrackerTimer.Interval = 2000;
+            qualificationTrackerTimer.Tick += OnQualificationTrackerTick;
+
+            debounceTimer = new System.Windows.Forms.Timer();
+            debounceTimer.Interval = 150;
+            debounceTimer.Tick += OnDebounceTimerTick;
+
+            BuildLauncherView();
+            BuildActiveView();
+        }
+
+        private void UpdateTrayContextMenu()
+        {
+            if (trayIcon == null) return;
+            ContextMenuStrip contextMenu = new ContextMenuStrip();
+            contextMenu.BackColor = Theme.BgCard;
+            contextMenu.ForeColor = Theme.TextPrimary;
+            contextMenu.ShowImageMargin = false;
+
+            if (isSimulatingMode)
+            {
+                ToolStripMenuItem showItem = new ToolStripMenuItem("Show " + currentDisplayName, null, (s, e) => RestoreFromTray());
+                showItem.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+                contextMenu.Items.Add(showItem);
+                contextMenu.Items.Add("Stop Simulation", null, (s, e) => OnStopAndSwitchClicked(s, e));
+                contextMenu.Items.Add(new ToolStripSeparator());
+                contextMenu.Items.Add("Exit App", null, (s, e) => ExitApplication());
+            }
+            else
+            {
+                ToolStripMenuItem showItem = new ToolStripMenuItem("Show Launcher", null, (s, e) => RestoreFromTray());
+                showItem.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+                contextMenu.Items.Add(showItem);
+                contextMenu.Items.Add(new ToolStripSeparator());
+                contextMenu.Items.Add("Exit App", null, (s, e) => ExitApplication());
+            }
+            trayIcon.ContextMenuStrip = contextMenu;
+        }
+
+        private void BuildLauncherView()
+        {
+            pnlLauncher = new Panel();
+            pnlLauncher.Dock = DockStyle.Fill;
+            pnlLauncher.BackColor = Theme.BgBase;
+
+            // Header Section
+            HeaderBadge badge = new HeaderBadge("DISCORD QUEST LAUNCHER", Theme.AccentPrimary, Theme.AccentPurple, Color.White);
+            badge.Location = new Point(16, 16);
+            badge.Size = new Size(184, 24);
+            pnlLauncher.Controls.Add(badge);
+
+            lblDatabaseStatus = new Label();
+            lblDatabaseStatus.UseMnemonic = false;
+            lblDatabaseStatus.Text = string.Format("● {0:N0} Games Loaded", GameDatabase.Instance.Count);
+            lblDatabaseStatus.Font = new Font("Segoe UI", 8f, FontStyle.Bold);
+            lblDatabaseStatus.ForeColor = Theme.AccentGreen;
+            lblDatabaseStatus.Location = new Point(260, 18);
+            lblDatabaseStatus.Size = new Size(244, 20);
+            lblDatabaseStatus.TextAlign = ContentAlignment.MiddleRight;
+            lblDatabaseStatus.Cursor = Cursors.Hand;
+            if (shelfToolTip != null)
+            {
+                shelfToolTip.SetToolTip(lblDatabaseStatus, "Click to refresh game database from Discord");
+            }
+            lblDatabaseStatus.Click += (s, e) =>
+            {
+                if (!GameDatabase.Instance.IsUpdating)
+                {
+                    lblDatabaseStatus.Text = "● Updating Database...";
+                    lblDatabaseStatus.ForeColor = Theme.AccentCyan;
+                    GameDatabase.Instance.RefreshFromDiscordAsync();
+                }
+            };
+            pnlLauncher.Controls.Add(lblDatabaseStatus);
+
+            Label lblTitle = new Label();
+            lblTitle.UseMnemonic = false;
+            lblTitle.Text = "Game Presence Simulator";
+            lblTitle.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
+            lblTitle.ForeColor = Theme.TextBright;
+            lblTitle.Location = new Point(14, 44);
+            lblTitle.Size = new Size(490, 28);
+            pnlLauncher.Controls.Add(lblTitle);
+
+            Label lblSubtitle = new Label();
+            lblSubtitle.UseMnemonic = false;
+            lblSubtitle.Text = "Select a game to spoof your Discord active playing status";
+            lblSubtitle.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+            lblSubtitle.ForeColor = Theme.TextMuted;
+            lblSubtitle.Location = new Point(16, 72);
+            lblSubtitle.Size = new Size(490, 18);
+            pnlLauncher.Controls.Add(lblSubtitle);
+
+            // Main Card
+            ModernCard card = new ModernCard();
+            card.Location = new Point(16, 96);
+            card.Size = new Size(488, 440);
+            card.BackColor = Theme.BgCard;
+            card.BorderColor = Theme.BorderSubtle;
+            card.Radius = 14;
+            card.ShowTopAccent = true;
+            card.AccentColor1 = Theme.AccentPrimary;
+            card.AccentColor2 = Theme.AccentPurple;
+
+            SectionLabel lblSearchHeader = new SectionLabel("SEARCH GAME DATABASE");
+            lblSearchHeader.Location = new Point(16, 14);
+            card.Controls.Add(lblSearchHeader);
+
+            ModernButton btnAddCustom = new ModernButton();
+            btnAddCustom.Text = "+ Add Custom";
+            btnAddCustom.Location = new Point(348, 8);
+            btnAddCustom.Size = new Size(124, 22);
+            btnAddCustom.Font = new Font("Segoe UI", 8f, FontStyle.Bold);
+            btnAddCustom.NormalColor1 = Theme.BgElevated;
+            btnAddCustom.NormalColor2 = Color.FromArgb(50, 52, 70);
+            btnAddCustom.HoverColor1 = Theme.AccentPrimary;
+            btnAddCustom.HoverColor2 = Theme.AccentPurple;
+            btnAddCustom.BorderRadius = 6;
+            btnAddCustom.Click += (s, e) => ShowAddCustomGameDialog(txtSearch != null ? txtSearch.Text : "");
+            card.Controls.Add(btnAddCustom);
+
+            // Resolve initial selected game (last simulated game, or fallback)
+            GameItem initialGame = GameDatabase.Instance.GetLastSimulatedGame();
+            if (initialGame == null)
+            {
+                initialGame = new GameItem
+                {
+                    id = "1437509662303059998",
+                    name = "Where Winds Meet",
+                    icon = "54b48542501564ce5e9837f7fa3171a5",
+                    exe = "where winds meet.exe"
+                };
+            }
+            else if (string.IsNullOrEmpty(initialGame.id) || string.IsNullOrEmpty(initialGame.icon))
+            {
+                GameItem found = GameDatabase.Instance.FindExactGame(initialGame.name) ?? GameDatabase.Instance.FindExactGame(initialGame.exe);
+                if (found != null)
+                {
+                    initialGame = found;
+                }
+            }
+
+            // Search input container
+            searchBox = new SearchBox();
+            searchBox.Location = new Point(16, 34);
+            searchBox.Size = new Size(456, 42);
+            txtSearch = searchBox.Input;
+            txtSearch.Text = initialGame.name;
+
+            searchBox.ClearButton.Click += (s, e) =>
+            {
+                txtSearch.Text = "";
+                txtSearch.Focus();
+                pnlDropdown.Visible = false;
+            };
+
+            txtSearch.TextChanged += (s, e) =>
+            {
+                if (isProgrammaticTextChange)
+                {
+                    debounceTimer.Stop();
+                    pnlDropdown.Visible = false;
+                    return;
+                }
+
+                debounceTimer.Stop();
+                debounceTimer.Start();
+            };
+
+            txtSearch.Enter += (s, e) =>
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    if (txtSearch != null && txtSearch.SelectionLength > 0)
+                    {
+                        txtSearch.SelectionStart = txtSearch.Text.Length;
+                        txtSearch.SelectionLength = 0;
+                    }
+                }));
+            };
+
+            txtSearch.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Down)
+                {
+                    if (pnlDropdown.Visible && listResults.Items.Count > 0)
+                    {
+                        int next = listResults.SelectedIndex + 1;
+                        if (next < listResults.Items.Count) listResults.SelectedIndex = next;
+                        else listResults.SelectedIndex = 0;
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                    }
+                    else if (!pnlDropdown.Visible && listResults.Items.Count > 0)
+                    {
+                        pnlDropdown.Visible = true;
+                        pnlDropdown.BringToFront();
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                    }
+                }
+                else if (e.KeyCode == Keys.Up)
+                {
+                    if (pnlDropdown.Visible && listResults.Items.Count > 0)
+                    {
+                        int prev = listResults.SelectedIndex - 1;
+                        if (prev >= 0) listResults.SelectedIndex = prev;
+                        else listResults.SelectedIndex = listResults.Items.Count - 1;
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                    }
+                }
+                else if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    GameItem selected = listResults.SelectedItem as GameItem;
+                    if (pnlDropdown.Visible && selected != null)
+                    {
+                        pnlDropdown.Visible = false;
+                        if (selected.id == "__ADD_CUSTOM__")
+                        {
+                            ShowAddCustomGameDialog(txtSearch.Text);
+                        }
+                        else
+                        {
+                            SelectGame(selected);
+                            LaunchSimulation(selected.exe);
+                        }
+                    }
+                    else
+                    {
+                        pnlDropdown.Visible = false;
+                        string text = txtSearch.Text.Trim();
+                        if (selectedGame != null && selectedGame.id != "__ADD_CUSTOM__" &&
+                            (string.IsNullOrEmpty(text) || string.Equals(selectedGame.name, text, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            LaunchSimulation(selectedGame.exe);
+                        }
+                        else
+                        {
+                            LaunchSimulation(text);
+                        }
+                    }
+                }
+                else if (e.KeyCode == Keys.Escape)
+                {
+                    pnlDropdown.Visible = false;
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
+            };
+
+            card.Controls.Add(searchBox);
+
+            // Played Games Section (ONLY games run for >= 2 minutes)
+            SectionLabel lblShelfHeader = new SectionLabel("PLAYED GAMES (2+ MINS)");
+            lblShelfHeader.Location = new Point(16, 88);
+            card.Controls.Add(lblShelfHeader);
+
+            shelfPlayedGames = new PlayedGamesShelfControl();
+            shelfPlayedGames.Location = new Point(16, 108);
+            shelfPlayedGames.Size = new Size(456, 54);
+            shelfPlayedGames.GameSelected += (game) => SelectGame(game);
+            card.Controls.Add(shelfPlayedGames);
+
+            PopulatePlayedGamesShelf();
+
+            // Selected Game Hero Card
+            SectionLabel lblSelectedHeader = new SectionLabel("SELECTED GAME");
+            lblSelectedHeader.Location = new Point(16, 172);
+            card.Controls.Add(lblSelectedHeader);
+
+            cardSelectedGame = new ModernCard();
+            cardSelectedGame.Location = new Point(16, 192);
+            cardSelectedGame.Size = new Size(456, 86);
+            cardSelectedGame.BackColor = Theme.BgElevated;
+            cardSelectedGame.BorderColor = Color.FromArgb(40, 88, 101, 242);
+            cardSelectedGame.Radius = 12;
+            cardSelectedGame.ShowTopAccent = true;
+            cardSelectedGame.AccentColor1 = Theme.AccentPrimary;
+            cardSelectedGame.AccentColor2 = Theme.AccentPurple;
+
+            picSelectedGameIcon = new RoundedIconView(12);
+            picSelectedGameIcon.Location = new Point(14, 14);
+            picSelectedGameIcon.Size = new Size(58, 58);
+            cardSelectedGame.Controls.Add(picSelectedGameIcon);
+
+            lblSelectedGameTitle = new Label();
+            lblSelectedGameTitle.UseMnemonic = false;
+            lblSelectedGameTitle.Text = initialGame.name;
+            lblSelectedGameTitle.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+            lblSelectedGameTitle.ForeColor = Theme.TextBright;
+            lblSelectedGameTitle.Location = new Point(84, 13);
+            lblSelectedGameTitle.Size = new Size(356, 22);
+            cardSelectedGame.Controls.Add(lblSelectedGameTitle);
+
+            lblSelectedGameExe = new Label();
+            lblSelectedGameExe.UseMnemonic = false;
+            lblSelectedGameExe.Text = "Target .exe: " + initialGame.exe;
+            lblSelectedGameExe.Font = new Font("Consolas", 8.5f, FontStyle.Regular);
+            lblSelectedGameExe.ForeColor = Theme.AccentGreen;
+            lblSelectedGameExe.Location = new Point(84, 37);
+            lblSelectedGameExe.Size = new Size(356, 18);
+            cardSelectedGame.Controls.Add(lblSelectedGameExe);
+
+            lblSelectedGameId = new Label();
+            lblSelectedGameId.UseMnemonic = false;
+            lblSelectedGameId.Text = string.IsNullOrEmpty(initialGame.id) ? "" : "Discord App ID: " + initialGame.id;
+            lblSelectedGameId.Font = new Font("Segoe UI", 7.5f, FontStyle.Regular);
+            lblSelectedGameId.ForeColor = Theme.TextDim;
+            lblSelectedGameId.Location = new Point(84, 57);
+            lblSelectedGameId.Size = new Size(356, 16);
+            cardSelectedGame.Controls.Add(lblSelectedGameId);
+
+            card.Controls.Add(cardSelectedGame);
+
+            // Launch Action Button (Full width, gradient with shimmer animation, no redundant icon)
+            ModernButton btnStart = new ModernButton();
+            btnStart.Text = "▶   Launch Game Simulation";
+            btnStart.Location = new Point(16, 290);
+            btnStart.Size = new Size(456, 50);
+            btnStart.Font = new Font("Segoe UI", 11.5f, FontStyle.Bold);
+            btnStart.NormalColor1 = Theme.AccentPrimary;
+            btnStart.NormalColor2 = Theme.AccentPurple;
+            btnStart.BorderRadius = 12;
+            btnStart.ShowShimmer = true;
+            btnStart.StartShimmer();
+            btnStart.Click += (s, e) =>
+            {
+                pnlDropdown.Visible = false;
+                string text = txtSearch != null ? txtSearch.Text.Trim() : "";
+                if (selectedGame != null && selectedGame.id != "__ADD_CUSTOM__" &&
+                    (string.IsNullOrEmpty(text) || string.Equals(selectedGame.name, text, StringComparison.OrdinalIgnoreCase)))
+                {
+                    LaunchSimulation(selectedGame.exe);
+                }
+                else
+                {
+                    LaunchSimulation(text);
+                }
+            };
+            card.Controls.Add(btnStart);
+
+            // Tray Checkbox and Footer notes
+            chkMinimizeToTray = new CheckBox();
+            chkMinimizeToTray.Text = "Minimize to system tray on close";
+            chkMinimizeToTray.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+            chkMinimizeToTray.ForeColor = Theme.TextSecondary;
+            chkMinimizeToTray.Location = new Point(16, 352);
+            chkMinimizeToTray.AutoSize = true;
+            chkMinimizeToTray.Cursor = Cursors.Hand;
+            chkMinimizeToTray.Checked = true;
+            if (shelfToolTip != null)
+            {
+                shelfToolTip.SetToolTip(chkMinimizeToTray, "When checked, pressing Close (X) sends the app to the system tray. Pressing Minimize (_) minimizes to the taskbar.");
+            }
+            card.Controls.Add(chkMinimizeToTray);
+
+            Label lblCardFooter = new Label();
+            lblCardFooter.UseMnemonic = false;
+            lblCardFooter.Text = "Runs continuously until closed. Stream this window in Discord for stream quests.";
+            lblCardFooter.Font = new Font("Segoe UI", 7.5f, FontStyle.Regular);
+            lblCardFooter.ForeColor = Theme.TextDim;
+            lblCardFooter.Location = new Point(16, 384);
+            lblCardFooter.Size = new Size(456, 28);
+            card.Controls.Add(lblCardFooter);
+
+            // Floating Dropdown Overlay Panel
+            pnlDropdown = new Panel();
+            pnlDropdown.Location = new Point(16, 78);
+            pnlDropdown.Size = new Size(456, 210);
+            pnlDropdown.BackColor = Theme.BgInput;
+            pnlDropdown.Visible = false;
+            pnlDropdown.Paint += (s, e) =>
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle r = new Rectangle(0, 0, pnlDropdown.Width - 1, pnlDropdown.Height - 1);
+                using (GraphicsPath p = Program.GetRoundedPath(r, 8))
+                {
+                    using (Pen pen = new Pen(Theme.AccentPrimary, 1.5f))
+                    {
+                        e.Graphics.DrawPath(pen, p);
+                    }
+                }
+            };
+
+            listResults = new SearchResultsListBox();
+            listResults.Dock = DockStyle.Fill;
+            listResults.MouseClick += (s, e) =>
+            {
+                int idx = listResults.IndexFromPoint(e.Location);
+                if (idx >= 0 && idx < listResults.Items.Count)
+                {
+                    GameItem selected = listResults.Items[idx] as GameItem;
+                    if (selected != null)
+                    {
+                        pnlDropdown.Visible = false;
+                        if (selected.id == "__ADD_CUSTOM__")
+                        {
+                            ShowAddCustomGameDialog(txtSearch.Text);
+                        }
+                        else
+                        {
+                            SelectGame(selected);
+                        }
+                    }
+                }
+            };
+            listResults.Click += (s, e) =>
+            {
+                GameItem selected = listResults.SelectedItem as GameItem;
+                if (selected != null)
+                {
+                    pnlDropdown.Visible = false;
+                    if (selected.id == "__ADD_CUSTOM__")
+                    {
+                        ShowAddCustomGameDialog(txtSearch.Text);
+                    }
+                    else
+                    {
+                        SelectGame(selected);
+                    }
+                }
+            };
+            listResults.DoubleClick += (s, e) =>
+            {
+                GameItem selected = listResults.SelectedItem as GameItem;
+                if (selected != null)
+                {
+                    pnlDropdown.Visible = false;
+                    if (selected.id == "__ADD_CUSTOM__")
+                    {
+                        ShowAddCustomGameDialog(txtSearch.Text);
+                    }
+                    else
+                    {
+                        SelectGame(selected);
+                    }
+                }
+            };
+            pnlDropdown.Controls.Add(listResults);
+            card.Controls.Add(pnlDropdown);
+            pnlDropdown.BringToFront();
+
+            pnlLauncher.Controls.Add(card);
+
+            Control[] dismissers = new Control[] { card, pnlLauncher, lblSearchHeader, shelfPlayedGames, cardSelectedGame, btnStart, chkMinimizeToTray, badge, lblTitle, lblSubtitle, lblShelfHeader, lblSelectedHeader, lblCardFooter };
+            foreach (Control c in dismissers)
+            {
+                c.Click += (s, e) => { pnlDropdown.Visible = false; };
+            }
+
+            // Set initial selected game
+            SelectGame(initialGame);
+
+            this.Controls.Add(pnlLauncher);
+        }
+
+        private void PopulatePlayedGamesShelf()
+        {
+            if (shelfPlayedGames != null)
+            {
+                shelfPlayedGames.SetGames(GameDatabase.Instance.GetQualifiedGames());
+            }
+        }
+
+        private void OnDebounceTimerTick(object sender, EventArgs e)
+        {
+            debounceTimer.Stop();
+            if (isProgrammaticTextChange)
+            {
+                pnlDropdown.Visible = false;
+                return;
+            }
+
+            string rawQuery = txtSearch.Text.Trim();
+            if (string.IsNullOrEmpty(rawQuery))
+            {
+                pnlDropdown.Visible = false;
+                return;
+            }
+
+            string cleanQuery = GameDatabase.CleanSearchQuery(rawQuery);
+            List<GameItem> matches = GameDatabase.Instance.Search(rawQuery, 40);
+            listResults.BeginUpdate();
+            listResults.Items.Clear();
+
+            foreach (var g in matches)
+            {
+                listResults.Items.Add(g);
+            }
+
+            bool hasExact = false;
+            for (int i = 0; i < matches.Count; i++)
+            {
+                string name = matches[i].name ?? "";
+                if (string.Equals(name, rawQuery, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, cleanQuery, StringComparison.OrdinalIgnoreCase) ||
+                    GameDatabase.NormalizeString(name) == GameDatabase.NormalizeString(rawQuery) ||
+                    GameDatabase.NormalizeString(name) == GameDatabase.NormalizeString(cleanQuery))
+                {
+                    hasExact = true;
+                    break;
+                }
+            }
+
+            if (!hasExact && matches.Count > 0 && matches[0] != null)
+            {
+                List<string> aliases = GameDatabase.ExpandAliases(rawQuery.ToLowerInvariant());
+                if (aliases.Contains((matches[0].name ?? "").ToLowerInvariant()))
+                {
+                    hasExact = true;
+                }
+            }
+
+            if (!hasExact && !string.IsNullOrWhiteSpace(rawQuery))
+            {
+                string inferred = GameDatabase.InferExecutableFromName(cleanQuery.Length > 0 ? cleanQuery : rawQuery);
+                listResults.Items.Add(new GameItem
+                {
+                    id = "__ADD_CUSTOM__",
+                    name = "+ Add \"" + rawQuery + "\" as Custom Game...",
+                    exe = "Inferred: " + inferred,
+                    icon = ""
+                });
+            }
+
+            listResults.EndUpdate();
+
+            if (listResults.Items.Count > 0)
+            {
+                listResults.SelectedIndex = 0;
+                pnlDropdown.Visible = true;
+                pnlDropdown.BringToFront();
+            }
+            else
+            {
+                pnlDropdown.Visible = false;
+            }
+        }
+
+        private void SelectGame(GameItem game)
+        {
+            if (game == null || game.id == "__ADD_CUSTOM__") return;
+            selectedGame = game;
+
+            isProgrammaticTextChange = true;
+            try
+            {
+                debounceTimer.Stop();
+                pnlDropdown.Visible = false;
+                txtSearch.Text = game.name;
+                txtSearch.SelectionStart = txtSearch.Text.Length;
+                txtSearch.SelectionLength = 0;
+            }
+            finally
+            {
+                isProgrammaticTextChange = false;
+            }
+
+            lblSelectedGameTitle.Text = game.name;
+            lblSelectedGameExe.Text = "Target .exe: " + game.exe;
+            lblSelectedGameId.Text = string.IsNullOrEmpty(game.id) ? "" : "Discord App ID: " + game.id;
+
+            GameItem capturedGame = selectedGame;
+            Image icon58 = IconCache.Instance.GetIcon(game, 58, (loaded) =>
+            {
+                if (this.IsHandleCreated)
+                {
+                    try
+                    {
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            // Only apply if this is still the selected game
+                            if (selectedGame == capturedGame)
+                            {
+                                picSelectedGameIcon.Image = loaded;
+                            }
+                        }));
+                    }
+                    catch { }
+                }
+            });
+
+            picSelectedGameIcon.Image = icon58;
+        }
+
+        private void BuildActiveView()
+        {
+            pnlActive = new Panel();
+            pnlActive.Dock = DockStyle.Fill;
+            pnlActive.BackColor = Theme.BgBase;
+            pnlActive.Visible = false;
+
+            // Header Presence Status Card
+            HeaderBadge badge = new HeaderBadge("ACTIVE SIMULATION", Theme.AccentGreen, Theme.AccentCyan, Theme.BgDeep);
+            badge.Location = new Point(16, 16);
+            badge.Size = new Size(160, 24);
+            pnlActive.Controls.Add(badge);
+
+            lblActiveHeaderRight = new Label();
+            lblActiveHeaderRight.UseMnemonic = false;
+            lblActiveHeaderRight.Text = "● Presence Broadcasting";
+            lblActiveHeaderRight.Font = new Font("Segoe UI", 8f, FontStyle.Bold);
+            lblActiveHeaderRight.ForeColor = Theme.AccentGreen;
+            lblActiveHeaderRight.Location = new Point(260, 18);
+            lblActiveHeaderRight.Size = new Size(244, 20);
+            lblActiveHeaderRight.TextAlign = ContentAlignment.MiddleRight;
+            pnlActive.Controls.Add(lblActiveHeaderRight);
+
+            Label lblTitle = new Label();
+            lblTitle.UseMnemonic = false;
+            lblTitle.Text = "Discord Presence Active";
+            lblTitle.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
+            lblTitle.ForeColor = Theme.TextBright;
+            lblTitle.Location = new Point(14, 44);
+            lblTitle.Size = new Size(490, 28);
+            pnlActive.Controls.Add(lblTitle);
+
+            Label lblSubtitle = new Label();
+            lblSubtitle.UseMnemonic = false;
+            lblSubtitle.Text = "Your spoofed game presence is broadcasting to Discord";
+            lblSubtitle.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+            lblSubtitle.ForeColor = Theme.TextMuted;
+            lblSubtitle.Location = new Point(16, 72);
+            lblSubtitle.Size = new Size(490, 18);
+            pnlActive.Controls.Add(lblSubtitle);
+
+            // Main Status Card
+            ModernCard card = new ModernCard();
+            card.Location = new Point(16, 96);
+            card.Size = new Size(488, 440);
+            card.BackColor = Theme.BgCard;
+            card.BorderColor = Theme.BorderSubtle;
+            card.Radius = 14;
+            card.ShowTopAccent = true;
+            card.AccentColor1 = Theme.AccentGreen;
+            card.AccentColor2 = Theme.AccentCyan;
+
+            StatusGlowDot dot = new StatusGlowDot();
+            dot.Location = new Point(16, 16);
+            card.Controls.Add(dot);
+
+            Label lblPresence = new Label();
+            lblPresence.UseMnemonic = false;
+            lblPresence.Text = "ACTIVE DISCORD PRESENCE";
+            lblPresence.Font = new Font("Segoe UI", 7.5f, FontStyle.Bold);
+            lblPresence.ForeColor = Theme.AccentGreen;
+            lblPresence.Location = new Point(36, 16);
+            lblPresence.AutoSize = true;
+            card.Controls.Add(lblPresence);
+
+            lblActiveGameTitle = new Label();
+            lblActiveGameTitle.UseMnemonic = false;
+            lblActiveGameTitle.Text = "Where Winds Meet";
+            lblActiveGameTitle.Font = new Font("Segoe UI", 14f, FontStyle.Bold);
+            lblActiveGameTitle.ForeColor = Theme.TextBright;
+            lblActiveGameTitle.Location = new Point(16, 38);
+            lblActiveGameTitle.Size = new Size(380, 26);
+            card.Controls.Add(lblActiveGameTitle);
+
+            lblActiveProcessInfo = new Label();
+            lblActiveProcessInfo.UseMnemonic = false;
+            lblActiveProcessInfo.Text = "where winds meet.exe | PID: 12345";
+            lblActiveProcessInfo.Font = new Font("Consolas", 9f, FontStyle.Regular);
+            lblActiveProcessInfo.ForeColor = Theme.TextMuted;
+            lblActiveProcessInfo.Location = new Point(16, 66);
+            lblActiveProcessInfo.Size = new Size(380, 20);
+            card.Controls.Add(lblActiveProcessInfo);
+
+            picActiveGameIcon = new RoundedIconView(12);
+            picActiveGameIcon.Location = new Point(414, 20);
+            picActiveGameIcon.Size = new Size(58, 58);
+            card.Controls.Add(picActiveGameIcon);
+
+            // Simulation Details Card (Clean, NO TIMER, NO COUNTDOWN)
+            ModernCard cardDetails = new ModernCard();
+            cardDetails.Location = new Point(16, 106);
+            cardDetails.Size = new Size(456, 134);
+            cardDetails.BackColor = Theme.BgElevated;
+            cardDetails.BorderColor = Theme.BorderSubtle;
+            cardDetails.Radius = 10;
+
+            SectionLabel lblStatusHeader = new SectionLabel("SIMULATION STATUS");
+            lblStatusHeader.Location = new Point(14, 12);
+            cardDetails.Controls.Add(lblStatusHeader);
+
+            lblHookStatus = new Label();
+            lblHookStatus.UseMnemonic = false;
+            lblHookStatus.Text = "● Discord Game Detection Active";
+            lblHookStatus.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+            lblHookStatus.ForeColor = Theme.AccentGreen;
+            lblHookStatus.Location = new Point(14, 32);
+            lblHookStatus.Size = new Size(428, 22);
+            cardDetails.Controls.Add(lblHookStatus);
+
+            lblSessionStartTime = new Label();
+            lblSessionStartTime.UseMnemonic = false;
+            lblSessionStartTime.Text = "Session started at: " + DateTime.Now.ToString("HH:mm:ss");
+            lblSessionStartTime.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+            lblSessionStartTime.ForeColor = Theme.TextSecondary;
+            lblSessionStartTime.Location = new Point(14, 56);
+            lblSessionStartTime.Size = new Size(428, 20);
+            cardDetails.Controls.Add(lblSessionStartTime);
+
+            ModernCard cardTip = new ModernCard();
+            cardTip.Location = new Point(14, 80);
+            cardTip.Size = new Size(428, 50);
+            cardTip.BackColor = Theme.BgCard;
+            cardTip.BorderColor = Theme.BorderSubtle;
+            cardTip.Radius = 8;
+
+            lblStreamHint = new Label();
+            lblStreamHint.UseMnemonic = false;
+            lblStreamHint.Text = "💡 Tip: Stream this window in Discord to complete stream quests.";
+            lblStreamHint.Font = new Font("Segoe UI", 8f, FontStyle.Regular);
+            lblStreamHint.ForeColor = Theme.TextDim;
+            lblStreamHint.Location = new Point(8, 6);
+            lblStreamHint.Size = new Size(412, 38);
+            cardTip.Controls.Add(lblStreamHint);
+
+            cardDetails.Controls.Add(cardTip);
+            card.Controls.Add(cardDetails);
+
+            // Action Buttons Row: Minimize to Tray, Stop Simulation, Exit
+            Panel pnlActions = new Panel();
+            pnlActions.Location = new Point(16, 256);
+            pnlActions.Size = new Size(456, 46);
+            pnlActions.BackColor = Theme.BgCard;
+
+            ModernFlatButton btnTray = new ModernFlatButton();
+            btnTray.Text = "Minimize to Tray";
+            btnTray.Location = new Point(0, 0);
+            btnTray.Size = new Size(140, 46);
+            btnTray.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            btnTray.Click += (s, e) => MinimizeToTray();
+            pnlActions.Controls.Add(btnTray);
+
+            ModernButton btnStop = new ModernButton();
+            btnStop.Text = "Stop Simulation";
+            btnStop.Location = new Point(148, 0);
+            btnStop.Size = new Size(168, 46);
+            btnStop.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            btnStop.NormalColor1 = Theme.AccentPrimary;
+            btnStop.NormalColor2 = Theme.AccentPurple;
+            btnStop.ShowShimmer = true;
+            btnStop.StartShimmer();
+            btnStop.Click += OnStopAndSwitchClicked;
+            pnlActions.Controls.Add(btnStop);
+
+            DangerButton btnExit = new DangerButton();
+            btnExit.Text = "Exit App";
+            btnExit.Location = new Point(324, 0);
+            btnExit.Size = new Size(132, 46);
+            btnExit.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            btnExit.Click += (s, e) => ExitApplication();
+            pnlActions.Controls.Add(btnExit);
+
+            card.Controls.Add(pnlActions);
+
+            Label lblActiveFooter = new Label();
+            lblActiveFooter.UseMnemonic = false;
+            lblActiveFooter.Text = "Simulation runs in background. Close (X) sends to tray; Exit App quits.";
+            lblActiveFooter.Font = new Font("Segoe UI", 7.5f, FontStyle.Regular);
+            lblActiveFooter.ForeColor = Theme.TextDim;
+            lblActiveFooter.Location = new Point(16, 320);
+            lblActiveFooter.Size = new Size(456, 20);
+            lblActiveFooter.TextAlign = ContentAlignment.MiddleCenter;
+            card.Controls.Add(lblActiveFooter);
+
+            pnlActive.Controls.Add(card);
+            this.Controls.Add(pnlActive);
+        }
+
+        private void SwitchToActiveMode()
+        {
+            isSimulatingMode = true;
+            this.Text = currentDisplayName;
+            Program.SetWindowText(this.Handle, currentDisplayName);
+            pnlLauncher.Visible = false;
+            pnlActive.Visible = true;
+
+            lblActiveGameTitle.Text = currentDisplayName;
+            lblActiveProcessInfo.Text = string.Format("{0}  |  PID: {1}{2}", currentExeName, Process.GetCurrentProcess().Id, (activeSimulatingGame != null && !string.IsNullOrEmpty(activeSimulatingGame.id)) ? ("  |  App ID: " + activeSimulatingGame.id) : "");
+            lblSessionStartTime.Text = "Session started at: " + DateTime.Now.ToString("HH:mm:ss");
+
+            if (activeSimulatingGame != null)
+            {
+                picActiveGameIcon.Image = IconCache.Instance.GetIcon(activeSimulatingGame, 58, (loaded) =>
+                {
+                    if (this.IsHandleCreated)
+                    {
+                        try { this.BeginInvoke(new Action(() => picActiveGameIcon.Image = loaded)); } catch { }
+                    }
+                });
+            }
+            else
+            {
+                picActiveGameIcon.Image = IconCache.Instance.GetFallbackGamepadIcon(58);
+            }
+
+            sessionStopwatch = Stopwatch.StartNew();
+            hasSaved2MinQualification = false;
+            qualificationFinalRecorded = false;
+            qualificationTrackerTimer.Start();
+
+            if (activeSimulatingGame != null)
+            {
+                GameDatabase.Instance.SaveLastSimulatedGame(activeSimulatingGame);
+            }
+            else if (!string.IsNullOrEmpty(currentDisplayName))
+            {
+                GameDatabase.Instance.SaveLastSimulatedGame(new GameItem
+                {
+                    name = currentDisplayName,
+                    exe = currentExeName
+                });
+            }
+
+            UpdateTrayContextMenu();
+
+            if (trayIcon != null)
+            {
+                string t = "Playing: " + currentDisplayName;
+                trayIcon.Text = t.Length > 63 ? t.Substring(0, 63) : t;
+            }
+
+            bool isFc27 = string.Equals(currentExeName, "fc27.exe", StringComparison.OrdinalIgnoreCase) ||
+                          (!string.IsNullOrEmpty(currentDisplayName) && currentDisplayName.IndexOf("FC 27", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (isFc27 && lblStreamHint != null)
+            {
+                lblStreamHint.Text = "⚠️ Quest Tip: Keep Discord status 'Online' (not Idle). If progress pauses, press Ctrl+R in Discord to reload game detection.";
+                lblStreamHint.ForeColor = Theme.AccentYellow;
+            }
+            else if (lblStreamHint != null)
+            {
+                lblStreamHint.Text = "💡 Tip: Stream this window in Discord to complete stream quests.";
+                lblStreamHint.ForeColor = Theme.TextDim;
+            }
+
+            if (activeSimulatingGame == null || string.IsNullOrWhiteSpace(activeSimulatingGame.id))
+            {
+                if (lblActiveHeaderRight != null)
+                {
+                    lblActiveHeaderRight.Text = "● Process Spoofed (No App ID)";
+                    lblActiveHeaderRight.ForeColor = Theme.TextMuted;
+                }
+                if (lblHookStatus != null)
+                {
+                    lblHookStatus.Text = "● Process Detection Active (Discord Process Matching)";
+                    lblHookStatus.ForeColor = Theme.AccentCyan;
+                }
+            }
+            else
+            {
+                if (lblActiveHeaderRight != null)
+                {
+                    lblActiveHeaderRight.Text = "● Connecting to Discord...";
+                    lblActiveHeaderRight.ForeColor = Theme.AccentCyan;
+                }
+                if (lblHookStatus != null)
+                {
+                    lblHookStatus.Text = "● Connecting to Discord IPC...";
+                    lblHookStatus.ForeColor = Theme.AccentCyan;
+                }
+            }
+
+            StartDiscordRpc(activeSimulatingGame);
+        }
+
+        private void SwitchToLauncherMode()
+        {
+            StopDiscordRpc();
+            isSimulatingMode = false;
+            this.Text = "Discord Quest Launcher";
+            Program.SetWindowText(this.Handle, "Discord Quest Launcher");
+            pnlActive.Visible = false;
+            pnlLauncher.Visible = true;
+            if (qualificationTrackerTimer != null) qualificationTrackerTimer.Stop();
+
+            EnsureDatabaseInitialized();
+
+            UpdateTrayContextMenu();
+
+            if (trayIcon != null)
+            {
+                trayIcon.Text = "Discord Quest Launcher";
+            }
+            PopulatePlayedGamesShelf();
+        }
+
+        private void StartDiscordRpc(GameItem game)
+        {
+            StopDiscordRpc();
+            if (game == null || string.IsNullOrWhiteSpace(game.id)) return;
+            string appId = game.id.Trim();
+            string appName = game.name ?? "Game";
+            string iconHash = game.icon ?? "";
+
+            lock (_rpcLock)
+            {
+                int sessionId = ++_rpcSessionId;
+                rpcRunning = true;
+                rpcThread = new Thread(() =>
+                {
+                    long startEpoch = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                    while (rpcRunning && _rpcSessionId == sessionId)
+                    {
+                        bool isConnected = false;
+                        try
+                        {
+                            if (rpcClient == null || !rpcClient.IsConnected)
+                            {
+                                if (rpcClient != null) { try { rpcClient.Dispose(); } catch { } rpcClient = null; }
+                                rpcClient = new DiscordRpcClient(appId);
+                                if (rpcClient.Connect(1000))
+                                {
+                                    rpcClient.SetActivity(appName, "In Game", iconHash, appName, startEpoch);
+                                    isConnected = true;
+                                }
+                            }
+                            else
+                            {
+                                rpcClient.SetActivity(appName, "In Game", iconHash, appName, startEpoch);
+                                isConnected = true;
+                            }
+                        }
+                        catch { }
+
+                        // Update UI status safely
+                        if (this.IsHandleCreated && !this.IsDisposed && _rpcSessionId == sessionId)
+                        {
+                            try
+                            {
+                                this.BeginInvoke(new Action(() =>
+                                {
+                                    if (!isSimulatingMode) return;
+                                    if (isConnected)
+                                    {
+                                        if (lblActiveHeaderRight != null)
+                                        {
+                                            lblActiveHeaderRight.Text = "● Presence Broadcasting";
+                                            lblActiveHeaderRight.ForeColor = Theme.AccentGreen;
+                                        }
+                                        if (lblHookStatus != null)
+                                        {
+                                            lblHookStatus.Text = "● Discord RPC & Game Detection Active";
+                                            lblHookStatus.ForeColor = Theme.AccentGreen;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        if (lblActiveHeaderRight != null)
+                                        {
+                                            lblActiveHeaderRight.Text = "● Discord Not Connected";
+                                            lblActiveHeaderRight.ForeColor = Theme.AccentYellow;
+                                        }
+                                        if (lblHookStatus != null)
+                                        {
+                                            lblHookStatus.Text = "● Process Spoofed (Discord Not Detected / Retrying RPC)";
+                                            lblHookStatus.ForeColor = Theme.AccentYellow;
+                                        }
+                                    }
+                                }));
+                            }
+                            catch { }
+                        }
+
+                        int sleepSeconds = isConnected ? 20 : 3;
+                        for (int i = 0; i < sleepSeconds && rpcRunning && _rpcSessionId == sessionId; i++)
+                        {
+                            Thread.Sleep(1000);
+                        }
+                    }
+
+                    try
+                    {
+                        if (rpcClient != null)
+                        {
+                            rpcClient.Dispose();
+                            rpcClient = null;
+                        }
+                    }
+                    catch { }
+                });
+                rpcThread.IsBackground = true;
+                rpcThread.Name = "DiscordRpcWorker";
+                rpcThread.Start();
+            }
+        }
+
+        private void StopDiscordRpc()
+        {
+            lock (_rpcLock)
+            {
+                rpcRunning = false;
+                _rpcSessionId++;
+                try
+                {
+                    if (rpcThread != null && rpcThread.IsAlive)
+                    {
+                        rpcThread.Join(500);
+                    }
+                }
+                catch { }
+                rpcThread = null;
+                try
+                {
+                    if (rpcClient != null)
+                    {
+                        rpcClient.Dispose();
+                        rpcClient = null;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private void OnQualificationTrackerTick(object sender, EventArgs e)
+        {
+            // Just marks that 2 minutes was reached; actual recording happens at stop/close
+            if (sessionStopwatch != null && isSimulatingMode && !hasSaved2MinQualification)
+            {
+                if (sessionStopwatch.Elapsed.TotalSeconds >= 120)
+                {
+                    hasSaved2MinQualification = true;
+                    qualificationTrackerTimer.Stop();
+                }
+            }
+        }
+
+        private void LaunchSimulation(string rawInput)
+        {
+            string input = rawInput.Trim().Trim('"', '\'');
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                MessageBox.Show("Please enter a game name or executable.", "Missing Game Name", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string exeName = input;
+            string displayName = "";
+            string iconId = "";
+            string iconHash = "";
+
+            if (selectedGame != null && selectedGame.id != "__ADD_CUSTOM__" &&
+                (string.Equals(selectedGame.name, input, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(selectedGame.exe, input, StringComparison.OrdinalIgnoreCase)))
+            {
+                exeName = selectedGame.exe;
+                displayName = selectedGame.name;
+                iconId = selectedGame.id ?? "";
+                iconHash = selectedGame.icon ?? "";
+            }
+            else
+            {
+                GameItem match = GameDatabase.Instance.FindExactGame(input);
+                if (match == null)
+                {
+                    List<GameItem> searchMatches = GameDatabase.Instance.Search(input, 1);
+                    if (searchMatches.Count > 0 && searchMatches[0].id != "__ADD_CUSTOM__")
+                    {
+                        match = searchMatches[0];
+                    }
+                }
+
+                if (match != null)
+                {
+                    SelectGame(match);
+                    exeName = match.exe;
+                    displayName = match.name;
+                    iconId = match.id ?? "";
+                    iconHash = match.icon ?? "";
+                }
+                else
+                {
+                    if (!exeName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    {
+                        exeName = GameDatabase.InferExecutableFromName(input);
+                    }
+                    displayName = FormatDisplayName(input);
+                }
+            }
+
+            GameDatabase.Instance.SaveLastSimulatedGame(new GameItem
+            {
+                id = iconId,
+                name = displayName,
+                icon = iconHash,
+                exe = exeName
+            });
+
+            string tempDir = Path.Combine(Path.GetTempPath(), "DiscordDummyTools");
+            if (!Directory.Exists(tempDir))
+            {
+                Directory.CreateDirectory(tempDir);
+            }
+
+            // Sanitize exe name to prevent path traversal (e.g. "..\..\..\Windows\System32\cmd.exe")
+            exeName = Path.GetFileName(exeName);
+            if (string.IsNullOrEmpty(exeName) || exeName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                MessageBox.Show("Invalid executable name.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Ensure valid .exe extension (some discord applications point to .bin, .des, or .game files)
+            if (!exeName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                exeName = Path.GetFileNameWithoutExtension(exeName) + ".exe";
+            }
+
+            string targetExePath = Path.Combine(tempDir, exeName);
+
+            // Special support for EA Sports FC 27 and Steam SKU quests
+            bool isFc27 = string.Equals(exeName, "fc27.exe", StringComparison.OrdinalIgnoreCase) ||
+                          (!string.IsNullOrEmpty(displayName) && displayName.IndexOf("FC 27", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (isFc27)
+            {
+                string steamPath = GetSteamPath();
+                if (!string.IsNullOrEmpty(steamPath))
+                {
+                    string steamapps = Path.Combine(steamPath, "steamapps");
+                    if (Directory.Exists(steamapps))
+                    {
+                        string steamGameDir = Path.Combine(steamapps, "common", "EA SPORTS FC 27");
+                        string steamExePath = Path.Combine(steamGameDir, "fc27.exe");
+
+                        // Safety: if the real game is installed, do NOT touch Steam files at all.
+                        // Our launcher is ~87KB; a real game exe is much larger.
+                        bool realGameInstalled = File.Exists(steamExePath);
+                        if (realGameInstalled)
+                        {
+                            try
+                            {
+                                long fileSize = new FileInfo(steamExePath).Length;
+                                realGameInstalled = (fileSize > 500000);
+                            }
+                            catch { realGameInstalled = true; }
+                        }
+
+                        if (!realGameInstalled)
+                        {
+                            // Safety: skip VDF edits if Steam is currently running to avoid corruption
+                            bool steamRunning = false;
+                            try { steamRunning = Process.GetProcessesByName("steam").Length > 0; } catch { }
+
+                            string acfPath = Path.Combine(steamapps, "appmanifest_4080220.acf");
+                            if (!File.Exists(acfPath))
+                            {
+                                try
+                                {
+                                    string acfContent = "\"AppState\"\n{\n\t\"appid\"\t\t\"4080220\"\n\t\"Universe\"\t\t\"1\"\n\t\"name\"\t\t\"EA SPORTS FC 27\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"EA SPORTS FC 27\"\n}\n";
+                                    File.WriteAllText(acfPath, acfContent, Encoding.UTF8);
+                                }
+                                catch { }
+                            }
+
+                            if (!steamRunning)
+                            {
+                                string libPath = Path.Combine(steamapps, "libraryfolders.vdf");
+                                if (File.Exists(libPath))
+                                {
+                                    try
+                                    {
+                                        string libText = File.ReadAllText(libPath);
+                                        if (!libText.Contains("\"4080220\""))
+                                        {
+                                            // Back up before modifying
+                                            string backupPath = libPath + ".bak";
+                                            if (!File.Exists(backupPath))
+                                            {
+                                                File.Copy(libPath, backupPath);
+                                            }
+                                            int appsIdx = libText.IndexOf("\"apps\"");
+                                            if (appsIdx >= 0)
+                                            {
+                                                int closeBrace = libText.IndexOf('}', appsIdx);
+                                                if (closeBrace >= 0)
+                                                {
+                                                    string newLib = libText.Insert(closeBrace, "\t\t\t\"4080220\"\t\t\"50000000000\"\n\t\t");
+                                                    File.WriteAllText(libPath, newLib, Encoding.UTF8);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+
+                            if (!Directory.Exists(steamGameDir))
+                            {
+                                try { Directory.CreateDirectory(steamGameDir); } catch { }
+                            }
+                            if (Directory.Exists(steamGameDir))
+                            {
+                                targetExePath = steamExePath;
+                            }
+                        }
+                        // If real game is installed, fall through and use tempDir path
+                    }
+                }
+            }
+
+            string currentExePath = Application.ExecutablePath;
+
+            if (string.Equals(currentExePath, targetExePath, StringComparison.OrdinalIgnoreCase))
+            {
+                currentDisplayName = displayName;
+                currentExeName = exeName;
+                SwitchToActiveMode();
+                return;
+            }
+
+            try
+            {
+                string processBaseName = Path.GetFileNameWithoutExtension(targetExePath);
+                Process[] existing = Process.GetProcessesByName(processBaseName);
+                foreach (var p in existing)
+                {
+                    try
+                    {
+                        // Only kill processes that are our own dummy, not real game processes
+                        string pPath = p.MainModule.FileName;
+                        if (string.Equals(pPath, targetExePath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            p.Kill();
+                            p.WaitForExit(1000);
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        try { p.Dispose(); } catch { }
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                File.Copy(currentExePath, targetExePath, true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Failed to create dummy executable:\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            int trayFlag = chkMinimizeToTray.Checked ? 1 : 0;
+
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = targetExePath;
+            psi.Arguments = string.Format("--simulating \"{0}\" \"{1}\" {2} {3} {4} \"{5}\" \"{6}\" \"{7}\"",
+                displayName, currentExePath, this.Location.X, this.Location.Y, trayFlag, exeName, iconId, iconHash);
+            psi.UseShellExecute = true;
+
+            try
+            {
+                Process.Start(psi);
+                isSwitchingProcesses = true;
+                if (trayIcon != null)
+                {
+                    trayIcon.Visible = false;
+                    trayIcon.Dispose();
+                    trayIcon = null;
+                }
+                this.Close();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Failed to start dummy executable:\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void OnStopAndSwitchClicked(object sender, EventArgs e)
+        {
+            StopDiscordRpc();
+            // Record qualification once if played >= 2 minutes
+            if (!qualificationFinalRecorded && sessionStopwatch != null && sessionStopwatch.Elapsed.TotalSeconds >= 120 && activeSimulatingGame != null)
+            {
+                qualificationFinalRecorded = true;
+                GameDatabase.Instance.RecordQualifiedGame(activeSimulatingGame, (int)sessionStopwatch.Elapsed.TotalSeconds);
+            }
+
+            if (!string.IsNullOrEmpty(originalLauncherPath) && File.Exists(originalLauncherPath))
+            {
+                isSwitchingProcesses = true;
+                if (trayIcon != null)
+                {
+                    trayIcon.Visible = false;
+                    trayIcon.Dispose();
+                    trayIcon = null;
+                }
+
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = originalLauncherPath;
+                psi.Arguments = string.Format("--launcher {0} {1}", this.Location.X, this.Location.Y);
+                psi.UseShellExecute = true;
+                try
+                {
+                    Process.Start(psi);
+                }
+                catch { }
+
+                ScheduleTempCleanup(Application.ExecutablePath);
+                this.Close();
+            }
+            else
+            {
+                SwitchToLauncherMode();
+            }
+        }
+
+        private bool isExplicitExit = false;
+
+        public void ExitApplication()
+        {
+            StopDiscordRpc();
+            isExplicitExit = true;
+            this.Close();
+        }
+
+        public void MinimizeToTray()
+        {
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke(new Action(MinimizeToTray));
+                return;
+            }
+
+            this.Hide();
+
+            if (trayIcon != null)
+            {
+                trayIcon.Visible = true;
+                string title = isSimulatingMode ? ("Simulating: " + currentDisplayName) : "Discord Quest Launcher";
+                string tip = title.Length > 63 ? title.Substring(0, 63) : title;
+                trayIcon.Text = tip;
+                try
+                {
+                    trayIcon.ShowBalloonTip(1500, "Discord Quest Launcher", title + "\nRunning in system tray. Right-click icon to exit.", ToolTipIcon.Info);
+                }
+                catch { }
+            }
+        }
+
+        public void RestoreFromTray()
+        {
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke(new Action(RestoreFromTray));
+                return;
+            }
+
+            this.Show();
+            if (this.WindowState == FormWindowState.Minimized)
+            {
+                this.WindowState = FormWindowState.Normal;
+            }
+            Program.ShowWindow(this.Handle, 9);
+            this.BringToFront();
+            this.Activate();
+            Program.SetForegroundWindow(this.Handle);
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            // If "Minimize to Tray" is selected and user pressed Close button (X), send to system tray instead of closing
+            if (!isExplicitExit && !isSwitchingProcesses && e.CloseReason != CloseReason.WindowsShutDown && e.CloseReason != CloseReason.ApplicationExitCall)
+            {
+                if (chkMinimizeToTray == null || chkMinimizeToTray.Checked)
+                {
+                    e.Cancel = true;
+                    MinimizeToTray();
+                    return;
+                }
+            }
+
+            StopDiscordRpc();
+            base.OnFormClosing(e);
+
+            // Record qualification if played >= 2 minutes before exit (only if not already recorded at stop)
+            if (!qualificationFinalRecorded && sessionStopwatch != null && sessionStopwatch.Elapsed.TotalSeconds >= 120 && activeSimulatingGame != null)
+            {
+                qualificationFinalRecorded = true;
+                GameDatabase.Instance.RecordQualifiedGame(activeSimulatingGame, (int)sessionStopwatch.Elapsed.TotalSeconds);
+            }
+
+            if (trayIcon != null)
+            {
+                trayIcon.Visible = false;
+                trayIcon.Dispose();
+            }
+
+            if (qualificationTrackerTimer != null)
+            {
+                qualificationTrackerTimer.Stop();
+                qualificationTrackerTimer.Dispose();
+            }
+
+            if (debounceTimer != null)
+            {
+                debounceTimer.Stop();
+                debounceTimer.Dispose();
+            }
+
+            if (isSimulatingMode && !isSwitchingProcesses)
+            {
+                ScheduleTempCleanup(Application.ExecutablePath);
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            base.OnFormClosed(e);
+            Application.Exit();
+        }
+
+        private static void ScheduleTempCleanup(string exePath)
+        {
+            try
+            {
+                string tempDir = Path.GetTempPath();
+                if (exePath.StartsWith(tempDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo();
+                    psi.FileName = "cmd.exe";
+                    psi.Arguments = string.Format("/c for /l %i in (1,1,10) do ( ping 127.0.0.1 -n 2 >nul & del /f /q \"{0}\" 2>nul & if not exist \"{0}\" exit )", exePath);
+                    psi.WindowStyle = ProcessWindowStyle.Hidden;
+                    psi.CreateNoWindow = true;
+                    psi.UseShellExecute = false;
+                    Process.Start(psi);
+                }
+            }
+            catch { }
+        }
+
+        private static string GetSteamPath()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam"))
+                {
+                    if (key != null)
+                    {
+                        object val = key.GetValue("SteamPath");
+                        if (val != null && !string.IsNullOrWhiteSpace(val.ToString()))
+                            return val.ToString().Replace('/', '\\');
+                    }
+                }
+            }
+            catch { }
+            try
+            {
+                using (var key = Registry.LocalMachine.OpenSubKey(@"Software\Valve\Steam") ??
+                                 Registry.LocalMachine.OpenSubKey(@"Software\WOW6432Node\Valve\Steam"))
+                {
+                    if (key != null)
+                    {
+                        object val = key.GetValue("InstallPath");
+                        if (val != null && !string.IsNullOrWhiteSpace(val.ToString()))
+                            return val.ToString().Replace('/', '\\');
+                    }
+                }
+            }
+            catch { }
+            string defaultPath = @"C:\Program Files (x86)\Steam";
+            if (Directory.Exists(defaultPath)) return defaultPath;
+            return null;
+        }
+
+        private void ShowAddCustomGameDialog(string initialQuery)
+        {
+            using (Form dialog = new Form())
+            {
+                dialog.Text = "Add Custom Game";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MaximizeBox = false;
+                dialog.MinimizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(420, 265);
+                dialog.BackColor = Theme.BgBase;
+                dialog.ForeColor = Theme.TextPrimary;
+                Program.EnableImmersiveDarkMode(dialog.Handle);
+
+                Label lblHeader = new Label();
+                lblHeader.Text = "Add Custom Game or Override";
+                lblHeader.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+                lblHeader.ForeColor = Theme.TextBright;
+                lblHeader.Location = new Point(16, 14);
+                lblHeader.Size = new Size(388, 24);
+                dialog.Controls.Add(lblHeader);
+
+                Label lblName = new Label();
+                lblName.Text = "Game Display Name:";
+                lblName.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+                lblName.ForeColor = Theme.TextSecondary;
+                lblName.Location = new Point(16, 44);
+                lblName.Size = new Size(388, 16);
+                dialog.Controls.Add(lblName);
+
+                TextBox txtName = new TextBox();
+                txtName.Location = new Point(16, 62);
+                txtName.Size = new Size(388, 24);
+                txtName.Font = new Font("Segoe UI", 9.5f);
+                txtName.BackColor = Theme.BgInput;
+                txtName.ForeColor = Theme.TextBright;
+                txtName.BorderStyle = BorderStyle.FixedSingle;
+                txtName.Text = initialQuery != null ? initialQuery.Trim() : "";
+                dialog.Controls.Add(txtName);
+
+                Label lblExe = new Label();
+                lblExe.Text = "Target Executable (.exe name, e.g. fc27.exe):";
+                lblExe.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+                lblExe.ForeColor = Theme.TextSecondary;
+                lblExe.Location = new Point(16, 94);
+                lblExe.Size = new Size(388, 16);
+                dialog.Controls.Add(lblExe);
+
+                TextBox txtExe = new TextBox();
+                txtExe.Location = new Point(16, 112);
+                txtExe.Size = new Size(388, 24);
+                txtExe.Font = new Font("Consolas", 9.5f);
+                txtExe.BackColor = Theme.BgInput;
+                txtExe.ForeColor = Theme.AccentGreen;
+                txtExe.BorderStyle = BorderStyle.FixedSingle;
+                txtExe.Text = GameDatabase.InferExecutableFromName(txtName.Text);
+                dialog.Controls.Add(txtExe);
+
+                bool exeManuallyEdited = false;
+                bool suppressExeAutoUpdate = false;
+                txtExe.TextChanged += (s, e) =>
+                {
+                    if (!suppressExeAutoUpdate) exeManuallyEdited = true;
+                };
+                txtName.TextChanged += (s, e) =>
+                {
+                    if (!exeManuallyEdited)
+                    {
+                        suppressExeAutoUpdate = true;
+                        txtExe.Text = GameDatabase.InferExecutableFromName(txtName.Text);
+                        suppressExeAutoUpdate = false;
+                    }
+                };
+
+                Label lblId = new Label();
+                lblId.Text = "Discord Application ID (Optional):";
+                lblId.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+                lblId.ForeColor = Theme.TextMuted;
+                lblId.Location = new Point(16, 144);
+                lblId.Size = new Size(388, 16);
+                dialog.Controls.Add(lblId);
+
+                TextBox txtId = new TextBox();
+                txtId.Location = new Point(16, 162);
+                txtId.Size = new Size(388, 24);
+                txtId.Font = new Font("Segoe UI", 9f);
+                txtId.BackColor = Theme.BgInput;
+                txtId.ForeColor = Theme.TextPrimary;
+                txtId.BorderStyle = BorderStyle.FixedSingle;
+                dialog.Controls.Add(txtId);
+
+                ModernButton btnSave = new ModernButton();
+                btnSave.Text = "Save & Select Game";
+                btnSave.Location = new Point(234, 206);
+                btnSave.Size = new Size(170, 36);
+                btnSave.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+                btnSave.NormalColor1 = Theme.AccentPrimary;
+                btnSave.NormalColor2 = Theme.AccentPurple;
+                btnSave.BorderRadius = 8;
+                btnSave.Click += (s, e) =>
+                {
+                    string gName = txtName.Text.Trim();
+                    string gExe = txtExe.Text.Trim();
+                    string gId = txtId.Text.Trim();
+
+                    if (string.IsNullOrEmpty(gName))
+                    {
+                        MessageBox.Show(dialog, "Please enter a game name.", "Input Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (string.IsNullOrEmpty(gExe))
+                    {
+                        gExe = GameDatabase.InferExecutableFromName(gName);
+                    }
+                    if (!gExe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    {
+                        gExe += ".exe";
+                    }
+
+                    GameItem custom = new GameItem
+                    {
+                        name = gName,
+                        exe = gExe,
+                        id = gId,
+                        icon = ""
+                    };
+
+                    GameDatabase.Instance.AddCustomGame(custom);
+                    SelectGame(custom);
+                    dialog.DialogResult = DialogResult.OK;
+                    dialog.Close();
+                };
+                dialog.Controls.Add(btnSave);
+
+                Button btnCancel = new Button();
+                btnCancel.Text = "Cancel";
+                btnCancel.Location = new Point(144, 206);
+                btnCancel.Size = new Size(80, 36);
+                btnCancel.Font = new Font("Segoe UI", 9f);
+                btnCancel.ForeColor = Theme.TextSecondary;
+                btnCancel.BackColor = Theme.BgCard;
+                btnCancel.FlatStyle = FlatStyle.Flat;
+                btnCancel.FlatAppearance.BorderColor = Theme.BorderMedium;
+                btnCancel.Cursor = Cursors.Hand;
+                btnCancel.Click += (s, e) => dialog.Close();
+                dialog.Controls.Add(btnCancel);
+
+                dialog.AcceptButton = btnSave;
+                dialog.CancelButton = btnCancel;
+
+                dialog.ShowDialog(this);
+            }
+        }
+
+        public static string FormatDisplayName(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "Game";
+            string name = raw.Trim();
+            // Only strip extension if it looks like a real executable filename
+            if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".bin", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
+            {
+                name = Path.GetFileNameWithoutExtension(name);
+            }
+
+            Match mFc = Regex.Match(name, @"^(?:ea\s*sports\s*)?fc\s*(\d+)$", RegexOptions.IgnoreCase);
+            if (mFc.Success) return "EA Sports FC " + mFc.Groups[1].Value;
+            Match mFifa = Regex.Match(name, @"^fifa\s*(\d+)$", RegexOptions.IgnoreCase);
+            if (mFifa.Success) return "FIFA " + mFifa.Groups[1].Value;
+            Match mUfc = Regex.Match(name, @"^(?:ea\s*sports\s*)?ufc\s*(\d+)$", RegexOptions.IgnoreCase);
+            if (mUfc.Success) return "EA Sports UFC " + mUfc.Groups[1].Value;
+
+            if (name.IndexOf("where winds meet", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Where Winds Meet";
+            if (name.IndexOf("wuthering waves", StringComparison.OrdinalIgnoreCase) >= 0 || name.Equals("Client-Win64-Shipping", StringComparison.OrdinalIgnoreCase))
+                return "Wuthering Waves";
+            if (name.IndexOf("starrail", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("honkai", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Honkai: Star Rail";
+            if (name.IndexOf("genshin", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Genshin Impact";
+            if (name.IndexOf("zenless", StringComparison.OrdinalIgnoreCase) >= 0 || Regex.IsMatch(name, @"\bzzz\b", RegexOptions.IgnoreCase))
+                return "Zenless Zone Zero";
+            if (name.IndexOf("warframe", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Warframe";
+            if (name.IndexOf("firstdescendant", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "The First Descendant";
+
+            string cleaned = name.Replace('_', ' ').Replace('-', ' ').Trim();
+            try
+            {
+                System.Globalization.TextInfo ti = System.Globalization.CultureInfo.CurrentCulture.TextInfo;
+                return ti.ToTitleCase(cleaned.ToLowerInvariant());
+            }
+            catch
+            {
+                return cleaned;
+            }
+        }
+
+        private static Icon CreateAppIcon()
+        {
+            try
+            {
+                using (Bitmap bmp = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(bmp))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.Clear(Color.Transparent);
+                        using (SolidBrush b = new SolidBrush(Color.FromArgb(88, 101, 242)))
+                        {
+                            g.FillEllipse(b, 2, 2, 28, 28);
+                        }
+                        using (SolidBrush wb = new SolidBrush(Color.White))
+                        {
+                            g.FillRectangle(wb, 8, 14, 16, 5);
+                            g.FillRectangle(wb, 13.5f, 8.5f, 5, 16);
+                        }
+                    }
+                    IntPtr hIcon = bmp.GetHicon();
+                    try
+                    {
+                        using (Icon temp = Icon.FromHandle(hIcon))
+                        {
+                            return (Icon)temp.Clone();
+                        }
+                    }
+                    finally
+                    {
+                        Program.DestroyIcon(hIcon);
+                    }
+                }
+            }
+            catch
+            {
+                return SystemIcons.Application;
+            }
+        }
+    }
+}
