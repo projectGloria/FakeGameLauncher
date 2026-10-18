@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -20,7 +20,7 @@ namespace DiscordQuestLauncher
 {
     public static class Program
     {
-        public const string BuildId = "v16-preserve-detection-paths";
+        public const string BuildId = "v17-window-lifecycle";
         [DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
@@ -29,6 +29,38 @@ namespace DiscordQuestLauncher
 
         [DllImport("user32.dll")]
         public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsIconic(IntPtr hWnd);
+
+        private delegate bool EnumWindowsCallback(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+
+        public static IntPtr FindProcessWindow(int processId)
+        {
+            // Process.MainWindowHandle excludes tool windows and hidden windows.
+            IntPtr result = IntPtr.Zero;
+            EnumWindows((window, parameter) =>
+            {
+                uint owner;
+                GetWindowThreadProcessId(window, out owner);
+                if (owner != (uint)processId || GetWindowTextLength(window) == 0) return true;
+                result = window;
+                return false;
+            }, IntPtr.Zero);
+            return result;
+        }
 
         [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -141,6 +173,11 @@ namespace DiscordQuestLauncher
             int d = radius * 2;
             if (d > rect.Width) d = rect.Width;
             if (d > rect.Height) d = rect.Height;
+            if (d <= 0)
+            {
+                path.AddRectangle(rect);
+                return path;
+            }
 
             path.AddArc(rect.X, rect.Y, d, d, 180, 90);
             path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
@@ -282,7 +319,7 @@ namespace DiscordQuestLauncher
             get
             {
                 CreateParams cp = base.CreateParams;
-                if (!visibleMode) cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW: hidden from Alt-Tab
+                if (!taskbarButton) cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW: hidden from Alt-Tab
                 return cp;
             }
         }
@@ -1791,109 +1828,95 @@ namespace DiscordQuestLauncher
             return File.Exists(path) ? path : null;
         }
 
+        private readonly Dictionary<string, List<Action<Image>>> _pendingCallbacks = new Dictionary<string, List<Action<Image>>>();
+        private readonly Dictionary<string, DateTime> _retryAfter = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, Image> _fallbackIcons = new Dictionary<string, Image>();
+
+        // Images are shared, immutable cache entries. Controls must not dispose them.
         public Image GetIcon(GameItem game, int size, int radius = 8, Action<Image> onLoaded = null)
         {
-            if (game == null || (string.IsNullOrEmpty(game.id) && string.IsNullOrEmpty(game.name)))
-            {
-                return GetFallbackGamepadIcon(size, radius);
-            }
-
-            string iconId = !string.IsNullOrEmpty(game.icon) ? game.icon : (!string.IsNullOrEmpty(game.id) ? game.id : game.NormalizedName);
-            string key = string.Format("{0}_{1}_{2}_{3}", game.id ?? "", iconId, size, radius);
+            if (game == null || string.IsNullOrEmpty(game.id)) return GetFallbackGamepadIcon(size, radius);
+            string iconId = !string.IsNullOrEmpty(game.icon) ? game.icon : game.id;
+            string key = string.Format("{0}_{1}_{2}_{3}", game.id, iconId, size, radius);
             lock (_lock)
             {
-                if (_memoryCache.ContainsKey(key))
+                Image cached;
+                if (_memoryCache.TryGetValue(key, out cached)) return cached;
+                DateTime retry;
+                if (_retryAfter.TryGetValue(key, out retry) && DateTime.UtcNow < retry)
+                    return GetFallbackGamepadIcon(size, radius);
+                List<Action<Image>> callbacks;
+                if (!_pendingCallbacks.TryGetValue(key, out callbacks))
                 {
-                    return _memoryCache[key];
+                    callbacks = new List<Action<Image>>();
+                    _pendingCallbacks[key] = callbacks;
                 }
+                if (onLoaded != null && !callbacks.Contains(onLoaded)) callbacks.Add(onLoaded);
+                if (_inFlight.Add(key))
+                    ThreadPool.QueueUserWorkItem(_ => LoadIcon(game, size, radius, key));
             }
+            return GetFallbackGamepadIcon(size, radius);
+        }
 
-            string diskPath = FindCachedIcon(game);
-            // Recheck daily so a temporary Steam outage does not permanently
-            // pin a game to its Discord fallback. Stale images remain visible.
-            bool preferredCache = diskPath != null &&
-                DateTime.UtcNow - File.GetLastWriteTimeUtc(diskPath) < TimeSpan.FromDays(1);
-            if (diskPath == null && !string.IsNullOrEmpty(game.id))
+        private void PublishIcon(string key, Image image, bool completed)
+        {
+            List<Action<Image>> callbacks;
+            lock (_lock)
             {
-                // Keep the verified Discord icon visible while Steam is checked.
-                string discordPath = Path.Combine(GameDatabase.Instance.CacheDirectory,
-                    "icons_official_v9", IconFileName(game));
-                if (File.Exists(discordPath)) diskPath = discordPath;
+                _memoryCache[key] = image;
+                callbacks = _pendingCallbacks.ContainsKey(key)
+                    ? new List<Action<Image>>(_pendingCallbacks[key]) : new List<Action<Image>>();
+                if (completed) _pendingCallbacks.Remove(key);
             }
-            Image cachedImage = null;
-
-            if (!string.IsNullOrEmpty(diskPath) && File.Exists(diskPath))
+            foreach (Action<Image> callback in callbacks)
             {
-                try
+                try { callback(image); }
+                catch (Exception ex) { Program.LogError("IconLoaded", ex); }
+            }
+        }
+
+        private void LoadIcon(GameItem game, int size, int radius, string key)
+        {
+            try
+            {
+                string diskPath = FindCachedIcon(game);
+                bool fresh = diskPath != null && DateTime.UtcNow - File.GetLastWriteTimeUtc(diskPath) < TimeSpan.FromDays(1);
+                if (diskPath == null)
                 {
-                    byte[] bytes = File.ReadAllBytes(diskPath);
-                    using (MemoryStream ms = new MemoryStream(bytes))
-                    using (Image src = Image.FromStream(ms))
+                    string officialPath = Path.Combine(GameDatabase.Instance.CacheDirectory, "icons_official_v9", IconFileName(game));
+                    if (File.Exists(officialPath)) diskPath = officialPath;
+                }
+                if (diskPath != null)
+                {
+                    try
                     {
-                        // Some official icons are only 48x48. Their size does not
-                        // justify replacing them with cover art or redownloading them.
-                        if (src.Width > 0 && src.Height > 0)
-                        {
-                            cachedImage = CreateRoundedThumbnail(src, size, radius);
-                            if (preferredCache)
-                            {
-                                lock (_lock)
-                                {
-                                    _memoryCache[key] = cachedImage;
-                                }
-                                return cachedImage;
-                            }
-                        }
+                        using (MemoryStream stream = new MemoryStream(File.ReadAllBytes(diskPath)))
+                        using (Image source = Image.FromStream(stream))
+                            PublishIcon(key, CreateRoundedThumbnail(source, size, radius), fresh);
+                        if (fresh) return;
                     }
+                    catch { }
                 }
-                catch { }
+                byte[] data = FetchHighQualityIconData(game);
+                if (data != null && data.Length > 0)
+                {
+                    using (MemoryStream stream = new MemoryStream(data))
+                    using (Image source = Image.FromStream(stream))
+                        PublishIcon(key, CreateRoundedThumbnail(source, size, radius), true);
+                    try { File.WriteAllBytes(Path.Combine(IconDirectory, IconFileName(game)), data); } catch { }
+                }
             }
-
-            // Fetch missing Steam-first icons in the background.
-            if (!preferredCache || cachedImage == null)
+            catch { }
+            finally
             {
                 lock (_lock)
                 {
-                    if (!_inFlight.Contains(key))
-                    {
-                        _inFlight.Add(key);
-                        ThreadPool.QueueUserWorkItem(_ =>
-                        {
-                            try
-                            {
-                                byte[] highResData = FetchHighQualityIconData(game);
-                                if (highResData != null && highResData.Length > 0)
-                                {
-                                    string savePath = Path.Combine(IconDirectory, IconFileName(game));
-
-                                    try { File.WriteAllBytes(savePath, highResData); } catch { }
-
-                                    using (MemoryStream ms = new MemoryStream(highResData))
-                                    using (Image src = Image.FromStream(ms))
-                                    {
-                                        Image rounded = CreateRoundedThumbnail(src, size, radius);
-                                        lock (_lock)
-                                        {
-                                            _memoryCache[key] = rounded;
-                                        }
-                                        if (onLoaded != null)
-                                        {
-                                            onLoaded(rounded);
-                                        }
-                                    }
-                                }
-                            }
-                            catch { }
-                            finally
-                            {
-                                lock (_lock) { _inFlight.Remove(key); }
-                            }
-                        });
-                    }
+                    _pendingCallbacks.Remove(key);
+                    _inFlight.Remove(key);
+                    // Failed downloads must not restart on every repaint.
+                    if (!_memoryCache.ContainsKey(key)) _retryAfter[key] = DateTime.UtcNow.AddMinutes(5);
                 }
             }
-
-            return cachedImage ?? GetFallbackGamepadIcon(size, radius);
         }
 
         private const string IconUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -2165,6 +2188,21 @@ namespace DiscordQuestLauncher
 
         public Image GetFallbackGamepadIcon(int size, int radius = 8)
         {
+            string key = size + "_" + radius;
+            lock (_lock)
+            {
+                Image image;
+                if (!_fallbackIcons.TryGetValue(key, out image))
+                {
+                    image = CreateFallbackGamepadIcon(size, radius);
+                    _fallbackIcons[key] = image;
+                }
+                return image;
+            }
+        }
+
+        private Image CreateFallbackGamepadIcon(int size, int radius)
+        {
             Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(bmp))
             {
@@ -2334,6 +2372,16 @@ namespace DiscordQuestLauncher
             int g = (int)(from.G + (to.G - from.G) * amt);
             int b = (int)(from.B + (to.B - from.B) * amt);
             return Color.FromArgb(r, g, b);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _animTimer != null)
+            {
+                _animTimer.Dispose();
+                _animTimer = null;
+            }
+            base.Dispose(disposing);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -2545,6 +2593,7 @@ namespace DiscordQuestLauncher
             }
             else
             {
+                _crossfadeTimer.Stop();
                 _crossfadeAlpha = 1.0f;
                 _prevIcon = null;
             }
@@ -2554,11 +2603,27 @@ namespace DiscordQuestLauncher
             {
                 if (this.IsHandleCreated && _game == newGame)
                 {
-                    try { this.BeginInvoke(new Action(() => { _currentIcon = img; Invalidate(); })); } catch { }
+                    try
+                    {
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            if (IsDisposed || _game != newGame) return;
+                            _currentIcon = img;
+                            Invalidate();
+                        }));
+                    }
+                    catch { }
                 }
             });
 
             Invalidate();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // A background disk load can finish before this control has a handle.
+            if (_game != null) SetGame(_game, false);
         }
 
         private void OnCrossfadeTick(object sender, EventArgs e)
@@ -2575,6 +2640,16 @@ namespace DiscordQuestLauncher
                 _prevIcon = null;
             }
             Invalidate();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _crossfadeTimer != null)
+            {
+                _crossfadeTimer.Dispose();
+                _crossfadeTimer = null;
+            }
+            base.Dispose(disposing);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -2768,6 +2843,12 @@ namespace DiscordQuestLauncher
             Invalidate();
         }
 
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            _iconCache32.Clear();
+        }
+
         private List<GameItem> GetVisibleGames()
         {
             List<GameItem> visible = new List<GameItem>();
@@ -2935,6 +3016,7 @@ namespace DiscordQuestLauncher
         private int _hoveredIndex = -1;
         private int _firstVisibleIndex;
         private readonly int ItemHeight = 44;
+        private readonly Action<Image> _iconLoaded;
 
         private int VisibleRowCount { get { return Math.Max(1, Height / ItemHeight); } }
 
@@ -2950,6 +3032,11 @@ namespace DiscordQuestLauncher
 
         public SearchDropdownList()
         {
+            _iconLoaded = image =>
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                try { BeginInvoke(new Action(() => { if (!IsDisposed) Invalidate(); })); } catch { }
+            };
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             this.BackColor = Theme.BgSurface;
@@ -3085,7 +3172,7 @@ namespace DiscordQuestLauncher
                 }
 
                 // 28px game icon
-                Image iconImg = IconCache.Instance.GetIcon(item, 28, 6);
+                Image iconImg = IconCache.Instance.GetIcon(item, 28, 6, _iconLoaded);
                 if (iconImg != null)
                 {
                     g.DrawImage(iconImg, new Rectangle(10, itemY + 8, 28, 28), 0, 0, iconImg.Width, iconImg.Height, GraphicsUnit.Pixel);
@@ -3333,6 +3420,7 @@ namespace DiscordQuestLauncher
             timerHoverCheck.Tick += (s, e) =>
             {
                 if (dummyProcess != null && dummyHwnd == IntPtr.Zero) SyncDummyWindow();
+                if (!Visible || WindowState == FormWindowState.Minimized) return;
                 Point pt = this.PointToClient(Cursor.Position);
                 bool inWin = this.ClientRectangle.Contains(pt);
                 if (inWin != _isMouseInWindow)
@@ -3804,6 +3892,7 @@ namespace DiscordQuestLauncher
                         dummyMode = mode;
                         dummyHwnd = IntPtr.Zero;
                         StartRunningState(running);
+                        SyncDummyWindow();
                     }));
                 }
                 catch
@@ -3831,18 +3920,33 @@ namespace DiscordQuestLauncher
                 {
                     dummyProcess.Refresh();
                     dummyHwnd = dummyProcess.MainWindowHandle;
+                    if (dummyHwnd == IntPtr.Zero) dummyHwnd = Program.FindProcessWindow(dummyProcess.Id);
                     if (dummyHwnd == IntPtr.Zero) return;
                 }
-                if (!this.Visible) return;
+                bool visible = this.Visible && this.WindowState != FormWindowState.Minimized;
+                if (!visible)
+                {
+                    if (Program.IsWindowVisible(dummyHwnd)) Program.ShowWindow(dummyHwnd, 0);
+                    return;
+                }
+                if (!Program.IsWindowVisible(dummyHwnd) || Program.IsIconic(dummyHwnd))
+                    Program.ShowWindow(dummyHwnd, 4); // SW_SHOWNOACTIVATE
                 Program.PlaceBelow(dummyHwnd, this.Handle, this.Location.X, this.Location.Y);
             }
             catch { }
         }
 
-        private void SetDummyVisible(bool visible)
+        protected override void OnResize(EventArgs e)
         {
-            if (dummyProcess == null || !DummyIsVisibleMode() || dummyHwnd == IntPtr.Zero) return;
-            try { Program.ShowWindow(dummyHwnd, visible ? 4 : 0); } catch { }
+            base.OnResize(e);
+            SyncDummyWindow();
+            if (WindowState != FormWindowState.Minimized) Invalidate(true);
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            SyncDummyWindow();
         }
 
         protected override void OnActivated(EventArgs e)
@@ -4135,7 +4239,9 @@ namespace DiscordQuestLauncher
                 menu.Items.Add(new ToolStripSeparator());
                 menu.Items.Add("Exit", null, (s, e) => ExitApplication());
             }
+            ContextMenuStrip previous = trayIcon.ContextMenuStrip;
             trayIcon.ContextMenuStrip = menu;
+            if (previous != null) previous.Dispose();
         }
 
         public void MinimizeToTray()
@@ -4146,7 +4252,6 @@ namespace DiscordQuestLauncher
                 return;
             }
             this.Hide();
-            SetDummyVisible(false);
         }
 
         public void RestoreFromTray()
@@ -4156,17 +4261,17 @@ namespace DiscordQuestLauncher
                 this.BeginInvoke(new Action(RestoreFromTray));
                 return;
             }
-            this.Show();
             if (this.WindowState == FormWindowState.Minimized)
             {
                 this.WindowState = FormWindowState.Normal;
             }
+            this.Show();
             Program.ShowWindow(this.Handle, 9);
             this.BringToFront();
             this.Activate();
             Program.SetForegroundWindow(this.Handle);
-            SetDummyVisible(true);
             SyncDummyWindow();
+            Invalidate(true);
         }
 
         private bool isExplicitExit = false;
@@ -4223,6 +4328,19 @@ namespace DiscordQuestLauncher
             Application.Exit();
         }
 
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                GameDatabase.Instance.OnDatabaseUpdated -= OnDatabaseLoaded;
+                GameDatabase.Instance.OnQualifiedGamesChanged -= OnQualifiedGamesUpdated;
+                GameDatabase.Instance.OnInitializationCompleted -= OnDatabaseLoaded;
+                if (globalToolTip != null) globalToolTip.Dispose();
+                if (trayIcon != null && trayIcon.ContextMenuStrip != null) trayIcon.ContextMenuStrip.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
         private void OnDatabaseLoaded()
         {
             if (this.IsHandleCreated)
@@ -4267,7 +4385,8 @@ namespace DiscordQuestLauncher
             {
                 // Windows 10 / older: fall back to a clipped (non-anti-aliased) rounded Region
                 Program.WindowRadius = 16;
-                this.Region = new Region(Program.GetRoundedPath(new Rectangle(0, 0, 360, 480), 16));
+                using (GraphicsPath path = Program.GetRoundedPath(new Rectangle(Point.Empty, this.ClientSize), 16))
+                    this.Region = new Region(path);
             }
         }
 

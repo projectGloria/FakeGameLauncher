@@ -55,6 +55,8 @@ public static class LauncherRegressionTests
             RpcProtocol();
             RpcLifecycle();
             HelperLifecycle();
+            IconLoadingAndControlLifetime();
+            WindowLifecycle();
             Console.WriteLine("PASS: " + checks + " application regression assertions");
             return 0;
         }
@@ -500,5 +502,102 @@ public static class LauncherRegressionTests
             Check(File.Exists(unrelated), "nested cleanup preserves neighboring session files");
         }
         finally { DisposeForm(form); }
+    }
+
+    private static void IconLoadingAndControlLifetime()
+    {
+        IconCache cache = IconCache.Instance;
+        Check(object.ReferenceEquals(cache.GetFallbackGamepadIcon(28, 6), cache.GetFallbackGamepadIcon(28, 6)),
+            "repainting missing icons reuses the same bitmap");
+        using (var path = Program.GetRoundedPath(new Rectangle(0, 0, 10, 10), 0))
+            Check(path.PointCount > 0, "zero-radius shapes render as rectangles");
+        GameItem game = Game("regression-icon", "Cached icon", "cached.exe");
+        string iconPath = Path.Combine(cache.IconDirectory, game.id + "_icon.png");
+        using (Bitmap image = new Bitmap(48, 48))
+        {
+            using (Graphics graphics = Graphics.FromImage(image)) graphics.Clear(Color.CornflowerBlue);
+            image.Save(iconPath, System.Drawing.Imaging.ImageFormat.Png);
+        }
+        int first = 0, second = 0;
+        Image loaded = null;
+        int uiThread = Thread.CurrentThread.ManagedThreadId;
+        bool background = false;
+        lock (Field(cache, "_lock"))
+        {
+            cache.GetIcon(game, 28, 6, image => { loaded = image; background = Thread.CurrentThread.ManagedThreadId != uiThread; Interlocked.Increment(ref first); });
+            cache.GetIcon(game, 28, 6, image => Interlocked.Increment(ref second));
+        }
+        WaitUntil(() => first == 1 && second == 1, 3000, "all subscribers receive a shared in-flight icon");
+        Check(background && object.ReferenceEquals(loaded, cache.GetIcon(game, 28, 6)),
+            "disk decoding runs off the UI thread and subsequent paints reuse its result");
+        using (PillActionButton button = new PillActionButton())
+        {
+            button.Dispose();
+            Check(Field(button, "_animTimer") == null, "disposing buttons releases animation timers");
+        }
+        using (HeroGameControl hero = new HeroGameControl())
+        {
+            hero.SetGame(Game("", "First", "first.exe"), false);
+            hero.SetGame(Game("", "Second", "second.exe"), true);
+            hero.SetGame(Game("", "Third", "third.exe"), false);
+            Check(!((System.Windows.Forms.Timer)Field(hero, "_crossfadeTimer")).Enabled,
+                "nonanimated selection cancels an earlier crossfade");
+            hero.Dispose();
+            Check(Field(hero, "_crossfadeTimer") == null, "disposing the hero releases its animation timer");
+        }
+    }
+
+    private static void WindowLifecycle()
+    {
+        foreach (string mode in new string[] { "single", "behind" })
+        {
+            File.WriteAllText(Path.Combine(root, "launch_mode.txt"), mode);
+            GameItem game = Game("", "Window regression", "window-test.exe");
+            Database.SaveLastSimulatedGame(game);
+            MainForm form = new MainForm(new string[] { "--launcher" });
+            try
+            {
+                form.Show();
+                Call(form, "SelectGame", game);
+                Call(form, "LaunchSimulation", game.exe);
+                WaitUntil(() => MainField(form, "dummyProcess") != null && (IntPtr)MainField(form, "dummyHwnd") != IntPtr.Zero,
+                    8000, mode + ": helper window is discovered");
+                IntPtr helper = (IntPtr)MainField(form, "dummyHwnd");
+                Check(Program.IsWindowVisible(helper), mode + ": helper starts underneath the visible launcher");
+                for (int cycle = 0; cycle < 3; cycle++)
+                {
+                    form.WindowState = FormWindowState.Minimized;
+                    Application.DoEvents();
+                    Check(!Program.IsWindowVisible(helper), mode + ": taskbar minimize hides the blank helper");
+                    form.WindowState = FormWindowState.Normal;
+                    Application.DoEvents();
+                    Check(Program.IsWindowVisible(helper) && !Program.IsIconic(helper), mode + ": taskbar restore restores the helper");
+                    form.MinimizeToTray();
+                    Check(!form.Visible && !Program.IsWindowVisible(helper), mode + ": tray minimize hides both windows");
+                    form.RestoreFromTray();
+                    Application.DoEvents();
+                    Check(form.Visible && form.WindowState == FormWindowState.Normal && Program.IsWindowVisible(helper),
+                        mode + ": tray restore restores both windows");
+                }
+                // The launch callback can run after the user has already hidden the launcher.
+                Call(form, "StopSimulation");
+                Call(form, "LaunchSimulation", game.exe);
+                form.MinimizeToTray();
+                WaitUntil(() => MainField(form, "dummyProcess") != null && (IntPtr)MainField(form, "dummyHwnd") != IntPtr.Zero,
+                    8000, mode + ": late helper is discovered while hidden");
+                helper = (IntPtr)MainField(form, "dummyHwnd");
+                Check(!Program.IsWindowVisible(helper), mode + ": late startup cannot leave a blank window behind");
+                form.RestoreFromTray();
+                Check(Program.IsWindowVisible(helper), mode + ": late helper restores normally");
+                using (Bitmap screenshot = new Bitmap(360, 480))
+                {
+                    form.DrawToBitmap(screenshot, new Rectangle(0, 0, 360, 480));
+                    Check(screenshot.GetPixel(180, 355).ToArgb() != Theme.BgBase.ToArgb(),
+                        mode + ": launcher controls still paint after repeated restores");
+                }
+                Call(form, "StopSimulation");
+            }
+            finally { DisposeForm(form); }
+        }
     }
 }
