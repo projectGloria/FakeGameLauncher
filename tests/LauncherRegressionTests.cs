@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -18,6 +18,9 @@ public static class LauncherRegressionTests
     private static string pipePrefix;
     private static int checks;
     private static GameDatabase Database { get { return GameDatabase.Instance; } }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hWnd, int index);
 
     private class TestForm : MainForm
     {
@@ -57,6 +60,8 @@ public static class LauncherRegressionTests
             HelperLifecycle();
             IconLoadingAndControlLifetime();
             WindowLifecycle();
+            SearchDropdownLayout();
+            SearchLightDismiss();
             Console.WriteLine("PASS: " + checks + " application regression assertions");
             return 0;
         }
@@ -563,7 +568,24 @@ public static class LauncherRegressionTests
                 WaitUntil(() => MainField(form, "dummyProcess") != null && (IntPtr)MainField(form, "dummyHwnd") != IntPtr.Zero,
                     8000, mode + ": helper window is discovered");
                 IntPtr helper = (IntPtr)MainField(form, "dummyHwnd");
+                // Visibility checks are meaningless if they target the wrong HWND (e.g. the hidden
+                // "GDI+ Window"), so pin discovery to the helper's actual Form window.
+                Check(Program.GetWindowClassName(helper).StartsWith("WindowsForms10.Window.", StringComparison.Ordinal),
+                    mode + ": discovered helper window is the WinForms form, not a GDI+/IME/broadcast window (got " + Program.GetWindowClassName(helper) + ")");
                 Check(Program.IsWindowVisible(helper), mode + ": helper starts underneath the visible launcher");
+                // Taskbar click-to-minimize only works when the shell sees WS_MINIMIZEBOX | WS_SYSMENU.
+                int style = GetWindowLong(form.Handle, -16);
+                Check((style & 0x00020000) != 0 && (style & 0x00080000) != 0,
+                    mode + ": launcher keeps WS_MINIMIZEBOX|WS_SYSMENU so a taskbar click minimizes it");
+                // Drive the same SC_MINIMIZE path the taskbar uses, not just WindowState.
+                Program.SendMessage(form.Handle, 0x0112, 0xF020, 0); // WM_SYSCOMMAND, SC_MINIMIZE
+                Application.DoEvents();
+                Check(Program.IsIconic(form.Handle) && !Program.IsWindowVisible(helper),
+                    mode + ": SC_MINIMIZE (taskbar click) minimizes the launcher and hides the helper");
+                Program.SendMessage(form.Handle, 0x0112, 0xF120, 0); // WM_SYSCOMMAND, SC_RESTORE
+                Application.DoEvents();
+                Check(!Program.IsIconic(form.Handle) && Program.IsWindowVisible(helper),
+                    mode + ": SC_RESTORE (taskbar click) restores launcher and helper");
                 for (int cycle = 0; cycle < 3; cycle++)
                 {
                     form.WindowState = FormWindowState.Minimized;
@@ -599,5 +621,74 @@ public static class LauncherRegressionTests
             }
             finally { DisposeForm(form); }
         }
+    }
+
+    private static void SearchDropdownLayout()
+    {
+        // Each text line must get a box at least as tall as its font's real line height,
+        // otherwise GDI clips descenders (the "overwatch.exe" bottom-half cut-off bug).
+        using (SearchDropdownList list = new SearchDropdownList())
+        {
+            list.Size = new Size(288, 180);
+            list.SetResults(new List<GameItem> { Game("", "Overwatch", "overwatch.exe"), Game("", "Dota 2", "dota2.exe") });
+            int rowHeight = (int)typeof(SearchDropdownList).GetProperty("ItemHeight", Private).GetValue(list, null);
+            int titleLine = (int)Field(list, "_titleLineHeight");
+            int exeLine = (int)Field(list, "_exeLineHeight");
+            const TextFormatFlags measure = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+            Check(exeLine >= TextRenderer.MeasureText("gjpqy.exe", FontManager.ListExeFont, Size.Empty, measure).Height,
+                "dropdown exe line box fits the exe font's descenders");
+            Check(titleLine >= TextRenderer.MeasureText("gjpqy", FontManager.SmallFont, Size.Empty, measure).Height,
+                "dropdown title line box fits the title font");
+            Check(titleLine + exeLine <= rowHeight, "dropdown title and exe lines fit inside one row");
+            Check(FontManager.ListExeFont.Size < FontManager.SmallFont.Size + 0.01f, "dropdown exe line does not out-weigh the title");
+            using (Bitmap bmp = new Bitmap(288, 180)) list.DrawToBitmap(bmp, new Rectangle(0, 0, 288, 180));
+        }
+    }
+
+    private static System.Windows.Forms.Message ClickOn(Control target, Point client)
+    {
+        // WM_LBUTTONDOWN as Windows would post it to the child under the cursor (client coords in lParam).
+        return System.Windows.Forms.Message.Create(target.Handle, 0x0201, (IntPtr)1, (IntPtr)((client.Y << 16) | (client.X & 0xFFFF)));
+    }
+
+    private static void SearchLightDismiss()
+    {
+        MainForm form = new MainForm(new string[] { "--launcher" });
+        try
+        {
+            form.Show();
+            Application.DoEvents();
+            Panel search = (Panel)MainField(form, "pnlInlineSearch");
+            Control dropdown = (Control)MainField(form, "searchDropdown");
+            Control switcher = (Control)MainField(form, "switcherControl");
+            Control status = (Control)MainField(form, "lblDiscordStatus");
+
+            Call(form, "OpenInlineSearch");
+            System.Windows.Forms.Message m = ClickOn(dropdown, new Point(20, 20));
+            form.PreFilterMessage(ref m);
+            Check(search.Visible && dropdown.Visible, "clicking inside the dropdown keeps search open");
+            m = ClickOn(search, new Point(5, 5));
+            form.PreFilterMessage(ref m);
+            Check(search.Visible, "clicking inside the search box keeps search open");
+
+            // Clicks on child controls never reach MainForm.OnMouseDown; this was the original bug.
+            m = ClickOn(switcher, new Point(4, 4));
+            Check(!form.PreFilterMessage(ref m), "outside click is passed through, not swallowed");
+            Check(!search.Visible && !dropdown.Visible, "clicking a child control outside search closes the dropdown");
+
+            Call(form, "OpenInlineSearch");
+            m = ClickOn(status, new Point(4, 4));
+            form.PreFilterMessage(ref m);
+            Check(!search.Visible, "clicking the status label closes the dropdown");
+
+            Call(form, "OpenInlineSearch");
+            typeof(Form).GetMethod("OnDeactivate", Private).Invoke(form, new object[] { EventArgs.Empty });
+            Check(!search.Visible && !dropdown.Visible, "losing focus to another app closes the dropdown");
+            Check(!(bool)MainField(form, "_outsideClickFilterActive"), "message filter is removed once search closes");
+
+            Call(form, "OpenInlineSearch");
+        }
+        finally { DisposeForm(form); }
+        Check(!(bool)MainField(form, "_outsideClickFilterActive"), "disposing with search open unregisters the message filter");
     }
 }

@@ -20,7 +20,7 @@ namespace DiscordQuestLauncher
 {
     public static class Program
     {
-        public const string BuildId = "v17-window-lifecycle";
+        public const string BuildId = "v18-helper-hwnd";
         [DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
@@ -47,15 +47,33 @@ namespace DiscordQuestLauncher
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern int GetWindowTextLength(IntPtr hWnd);
 
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+
+        public static string GetWindowClassName(IntPtr hWnd)
+        {
+            StringBuilder sb = new StringBuilder(256);
+            GetClassName(hWnd, sb, sb.Capacity);
+            return sb.ToString();
+        }
+
         public static IntPtr FindProcessWindow(int processId)
         {
-            // Process.MainWindowHandle excludes tool windows and hidden windows.
+            // Process.MainWindowHandle returns 0 for the helper: ShowInTaskbar=false gives the form a
+            // hidden WinForms parking-window owner, and MainWindowHandle skips owned windows.
+            // "First titled window" is NOT good enough either: every WinForms process also owns hidden
+            // top-level "GDI+ Window (x.exe)", ".NET-BroadcastEventWindow..." and "Default IME" windows,
+            // and the helper form sits at HWND_BOTTOM, so EnumWindows (z-order) hits those first.
+            // Grabbing the GDI+ window meant SW_SHOWNOACTIVATE turned it into a second taskbar button
+            // while minimize hid it instead of the real 360x480 form, leaving a blank window on screen.
+            // Only a titled WindowsForms10.Window.* is the actual Form (the parking window is untitled).
             IntPtr result = IntPtr.Zero;
             EnumWindows((window, parameter) =>
             {
                 uint owner;
                 GetWindowThreadProcessId(window, out owner);
                 if (owner != (uint)processId || GetWindowTextLength(window) == 0) return true;
+                if (!GetWindowClassName(window).StartsWith("WindowsForms10.Window.", StringComparison.Ordinal)) return true;
                 result = window;
                 return false;
             }, IntPtr.Zero);
@@ -64,6 +82,12 @@ namespace DiscordQuestLauncher
 
         [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int X; public int Y; }
+
+        [DllImport("user32.dll")]
+        public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern bool DestroyIcon(IntPtr handle);
@@ -411,6 +435,7 @@ namespace DiscordQuestLauncher
         private static Font _timerFont;
         private static Font _searchFont;
         private static Font _smallFont;
+        private static Font _listExeFont;
 
         public static Font NameFont
         {
@@ -440,6 +465,13 @@ namespace DiscordQuestLauncher
         public static Font SmallFont
         {
             get { return _smallFont ?? (_smallFont = ResolveFont(new string[] { "Inter", "Geist", "Segoe UI" }, 10f, FontStyle.Regular)); }
+        }
+
+        // Secondary exe line in dense lists (search dropdown). ExeFont (12pt) is sized for the hero card
+        // and would out-weigh the 10pt title above it; this keeps title > exe hierarchy in a 44px row.
+        public static Font ListExeFont
+        {
+            get { return _listExeFont ?? (_listExeFont = ResolveFont(new string[] { "Geist Mono", "JetBrains Mono", "Cascadia Code", "Consolas" }, 8.5f, FontStyle.Regular)); }
         }
 
         private static Font ResolveFont(string[] familyNames, float size, FontStyle style)
@@ -3015,8 +3047,31 @@ namespace DiscordQuestLauncher
         private int _selectedIndex = 0;
         private int _hoveredIndex = -1;
         private int _firstVisibleIndex;
-        private readonly int ItemHeight = 44;
+        private const int MinItemHeight = 44;
+        private const int TextGap = 1;
+        private int _itemHeight;   // 0 = not measured yet
+        private int _titleLineHeight;
+        private int _exeLineHeight;
         private readonly Action<Image> _iconLoaded;
+
+        // Row geometry comes from the fonts' real line heights, not hard-coded pixel boxes.
+        // GDI (TextRenderer) clips to the rect it's given, so a 14px box under a ~19px font silently
+        // chopped the descenders off every exe line. Measuring once also survives font fallback
+        // (Inter -> Segoe UI, Geist Mono -> Consolas) and non-100% DPI, where fixed boxes break.
+        private int ItemHeight
+        {
+            get
+            {
+                if (_itemHeight == 0)
+                {
+                    const TextFormatFlags measure = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+                    _titleLineHeight = TextRenderer.MeasureText("Ag", FontManager.SmallFont, Size.Empty, measure).Height;
+                    _exeLineHeight = TextRenderer.MeasureText("Ag", FontManager.ListExeFont, Size.Empty, measure).Height;
+                    _itemHeight = Math.Max(MinItemHeight, _titleLineHeight + TextGap + _exeLineHeight + 8);
+                }
+                return _itemHeight;
+            }
+        }
 
         private int VisibleRowCount { get { return Math.Max(1, Height / ItemHeight); } }
 
@@ -3171,22 +3226,24 @@ namespace DiscordQuestLauncher
                     }
                 }
 
-                // 28px game icon
+                // 28px game icon, vertically centred in the row
                 Image iconImg = IconCache.Instance.GetIcon(item, 28, 6, _iconLoaded);
                 if (iconImg != null)
                 {
-                    g.DrawImage(iconImg, new Rectangle(10, itemY + 8, 28, 28), 0, 0, iconImg.Width, iconImg.Height, GraphicsUnit.Pixel);
+                    g.DrawImage(iconImg, new Rectangle(10, itemY + (ItemHeight - 28) / 2, 28, 28), 0, 0, iconImg.Width, iconImg.Height, GraphicsUnit.Pixel);
                 }
 
-                // Title (13px)
-                Rectangle textRect = new Rectangle(46, itemY + 6, Width - 62, 18);
-                TextRenderer.DrawText(g, item.name, FontManager.SmallFont, textRect, Theme.TextPrimary,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                // Title + exe stacked as one block centred in the row; each rect is exactly one measured
+                // line tall so nothing gets clipped. NoPadding must match the flags used to measure.
+                const TextFormatFlags line = TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine |
+                                             TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis;
+                int textWidth = Width - 62;
+                int blockTop = itemY + (ItemHeight - (_titleLineHeight + TextGap + _exeLineHeight)) / 2;
+                Rectangle textRect = new Rectangle(46, blockTop, textWidth, _titleLineHeight);
+                TextRenderer.DrawText(g, item.name, FontManager.SmallFont, textRect, Theme.TextPrimary, line);
 
-                // Exe (10px monospace)
-                Rectangle exeRect = new Rectangle(46, itemY + 24, Width - 62, 14);
-                TextRenderer.DrawText(g, item.exe, FontManager.ExeFont, exeRect, Theme.TextMuted,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                Rectangle exeRect = new Rectangle(46, textRect.Bottom + TextGap, textWidth, _exeLineHeight);
+                TextRenderer.DrawText(g, item.exe, FontManager.ListExeFont, exeRect, Theme.TextMuted, line);
             }
             if (_items.Count > VisibleRowCount)
             {
@@ -3203,7 +3260,7 @@ namespace DiscordQuestLauncher
 
     #region Main Form
 
-    public class MainForm : Form
+    public class MainForm : Form, IMessageFilter
     {
         private string originalLauncherPath = "";
         private string currentExeName = "";
@@ -3596,15 +3653,77 @@ namespace DiscordQuestLauncher
             List<GameItem> initialMatches = GameDatabase.Instance.Search("", 10);
             searchDropdown.SetResults(initialMatches);
             searchResultsQuery = "";
+
+            // Only listen while search is open: the filter sees every message on the UI thread.
+            if (!_outsideClickFilterActive)
+            {
+                Application.AddMessageFilter(this);
+                _outsideClickFilterActive = true;
+            }
         }
 
         private void CloseInlineSearch()
         {
+            RemoveOutsideClickFilter();
             debounceSearchTimer.Stop();
             pnlInlineSearch.Visible = false;
             searchDropdown.Visible = false;
             heroControl.IsSearchActive = false;
             this.ActiveControl = btnAction;
+        }
+
+        private bool _outsideClickFilterActive;
+
+        private void RemoveOutsideClickFilter()
+        {
+            if (!_outsideClickFilterActive) return;
+            Application.RemoveMessageFilter(this);
+            _outsideClickFilterActive = false;
+        }
+
+        // Light-dismiss for the search overlay. Mouse messages go to the HWND under the cursor, so
+        // MainForm.OnMouseDown never sees clicks on the hero, switcher, pill button or status label.
+        // A thread-level IMessageFilter runs before dispatch to ANY control, so one check covers them all.
+        // We return false (don't swallow it) so the click still does its normal job, e.g. clicking a
+        // switcher icon closes search AND selects that game, like any native popup.
+        public bool PreFilterMessage(ref Message m)
+        {
+            const int WM_LBUTTONDOWN = 0x0201, WM_RBUTTONDOWN = 0x0204, WM_MBUTTONDOWN = 0x0207;
+            const int WM_NCLBUTTONDOWN = 0x00A1, WM_NCRBUTTONDOWN = 0x00A4;
+            if (!pnlInlineSearch.Visible) return false;
+
+            Point screen;
+            if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_RBUTTONDOWN || m.Msg == WM_MBUTTONDOWN)
+            {
+                // Client messages carry coordinates relative to m.HWnd (signed 16-bit each).
+                Program.POINT pt = new Program.POINT();
+                pt.X = unchecked((short)(m.LParam.ToInt64() & 0xFFFF));
+                pt.Y = unchecked((short)((m.LParam.ToInt64() >> 16) & 0xFFFF));
+                Program.ClientToScreen(m.HWnd, ref pt);
+                screen = new Point(pt.X, pt.Y);
+            }
+            else if (m.Msg == WM_NCLBUTTONDOWN || m.Msg == WM_NCRBUTTONDOWN)
+            {
+                // Non-client messages already carry screen coordinates.
+                screen = new Point(unchecked((short)(m.LParam.ToInt64() & 0xFFFF)), unchecked((short)((m.LParam.ToInt64() >> 16) & 0xFFFF)));
+            }
+            else return false;
+
+            if (!IsInsideSearchUi(screen)) CloseInlineSearch();
+            return false;
+        }
+
+        private bool IsInsideSearchUi(Point screenPoint)
+        {
+            return RectangleToScreen(pnlInlineSearch.Bounds).Contains(screenPoint) ||
+                   (searchDropdown.Visible && RectangleToScreen(searchDropdown.Bounds).Contains(screenPoint));
+        }
+
+        // Clicking another app / Alt-Tab never produces a mouse message on our thread, so close on focus loss too.
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            if (pnlInlineSearch != null && pnlInlineSearch.Visible) CloseInlineSearch();
         }
 
         private void OnDebounceSearchTick(object sender, EventArgs e)
@@ -4332,6 +4451,8 @@ namespace DiscordQuestLauncher
         {
             if (disposing)
             {
+                // Application's filter list holds a strong ref to us; drop it or the form leaks.
+                RemoveOutsideClickFilter();
                 GameDatabase.Instance.OnDatabaseUpdated -= OnDatabaseLoaded;
                 GameDatabase.Instance.OnQualifiedGamesChanged -= OnQualifiedGamesUpdated;
                 GameDatabase.Instance.OnInitializationCompleted -= OnDatabaseLoaded;
@@ -4372,6 +4493,12 @@ namespace DiscordQuestLauncher
                 CreateParams cp = base.CreateParams;
                 cp.Style &= ~0x00C00000; // WS_CAPTION
                 cp.Style &= ~0x00040000; // WS_THICKFRAME
+                // The taskbar only minimizes the active window on click if it has WS_MINIMIZEBOX
+                // (the shell checks the style before sending SC_MINIMIZE). WS_SYSMENU is needed for that bit to count.
+                // With WS_CAPTION stripped, neither paints anything; they only re-enable the shell behaviour
+                // (taskbar click-to-minimize, Win+Down, Alt+Space menu) that ControlBox/MinimizeBox=false removed.
+                cp.Style |= 0x00020000; // WS_MINIMIZEBOX
+                cp.Style |= 0x00080000; // WS_SYSMENU
                 cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
                 return cp;
             }
@@ -4515,12 +4642,7 @@ namespace DiscordQuestLauncher
                     return;
                 }
 
-                // Drag window by empty areas
-                if (pnlInlineSearch.Visible && !pnlInlineSearch.Bounds.Contains(e.Location) && !searchDropdown.Bounds.Contains(e.Location))
-                {
-                    CloseInlineSearch();
-                }
-
+                // Drag window by empty areas (search light-dismiss is handled in PreFilterMessage)
                 Program.DragWindow(this.Handle);
             }
         }
