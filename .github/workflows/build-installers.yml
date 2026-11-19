@@ -1,0 +1,124 @@
+name: Build Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 1.0.0). Leave empty for dev build.'
+        required: false
+        default: ''
+        type: string
+
+permissions: {}
+
+jobs:
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: powershell
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $rawVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          } elseif (-not [string]::IsNullOrWhiteSpace($env:INPUT_VERSION)) {
+            $rawVersion = $env:INPUT_VERSION -replace '^v', ''
+          } else {
+            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+            $rawVersion = "0.0.0-dev.$shortSha"
+          }
+
+          # Sanitize filename-safe version and extract numeric X.Y.Z.W for PE VersionInfo
+          $safeVersion = ($rawVersion -replace '[^0-9A-Za-z._-]', '-')
+          if ($rawVersion -match '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?') {
+            $patch4 = if ($Matches[4]) { $Matches[4] } else { '0' }
+            $numericVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).$patch4"
+          } else {
+            $numericVersion = '0.0.0.0'
+          }
+
+          "app_version=$safeVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "numeric_version=$numericVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Resolved version: $safeVersion (numeric: $numericVersion)"
+
+      - name: Run regression tests
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -File .\tests\Run-Tests.ps1
+
+      - name: Build GameLauncher.exe
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Launcher.ps1
+
+      - name: Ensure Inno Setup is available
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            $defaultPath = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+            if (Test-Path $defaultPath) {
+              "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            } else {
+              choco install innosetup --no-progress -y
+              "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+
+      - name: Build Windows installer (.exe)
+        shell: powershell
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+          NUMERIC_VERSION: ${{ steps.version.outputs.numeric_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'installers' -Force | Out-Null
+          $outputBase = "discord-quest-launcher-$($env:APP_VERSION)-windows-x64"
+
+          ISCC.exe `
+            "/DAppVersion=$($env:APP_VERSION)" `
+            "/DAppNumericVersion=$($env:NUMERIC_VERSION)" `
+            "/DOutputBaseName=$outputBase" `
+            "installer\DiscordQuestLauncher.iss"
+
+          Get-ChildItem -Path 'installers'
+
+      - name: Upload installers artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: installers/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download installers artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: installers
+          path: installers
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installers/*
+          generate_release_notes: true

@@ -199,6 +199,21 @@ The project is built entirely in C# targeting the native Windows .NET Framework 
 
 ---
 
+## 📦 How to Release
+
+Installers are built automatically via GitHub Actions (`.github/workflows/build-installers.yml`) using Inno Setup.
+
+1. **Tag a release and push it:**
+   ```bash
+   git tag v1.0.0
+   git push --tags
+   ```
+2. **Download the installer:**
+   - **Tag builds (`v*`)**: Download `discord-quest-launcher-<version>-windows-x64.exe` from the repository's **Releases** page (`https://github.com/projectGloria/FakeGameLauncher/releases`).
+   - **Manual builds**: Trigger the **Build Installers** workflow from the **Actions** tab and download the `installers` artifact from the completed run.
+
+---
+
 ## 📁 Configuration &amp; Storage
 
 The application isolates all persistent state and cached metadata under `%LOCALAPPDATA%\DiscordQuestLauncher`:
