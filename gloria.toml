@@ -1,0 +1,10 @@
+id            = "FakeGameLauncher"
+name          = "FakeGameLauncher"
+version       = "1.1.0"
+main_exe      = "GameLauncher.exe"
+icon          = "assets/AppIcon.ico"
+accent        = "#818cf8"
+description   = "Discord game presence & quest companion"
+needs_webview2 = false
+data_folders  = ["%LOCALAPPDATA%\\DiscordQuestLauncher"]
+legacy_names  = ["Discord Quest Launcher"]

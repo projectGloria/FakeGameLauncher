@@ -7,52 +7,24 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version override (e.g. 1.0.0). Leave empty for dev build.'
+        description: 'Version override (e.g. 1.0.0). Leave empty to use gloria.toml.'
         required: false
         default: ''
         type: string
 
-permissions: {}
+permissions:
+  contents: write
 
 jobs:
   build-windows:
-    name: Build Windows Installer
+    name: Build Windows Setup
     runs-on: windows-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: powershell
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $rawVersion = $env:GITHUB_REF_NAME -replace '^v', ''
-          } elseif (-not [string]::IsNullOrWhiteSpace($env:INPUT_VERSION)) {
-            $rawVersion = $env:INPUT_VERSION -replace '^v', ''
-          } else {
-            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
-            $rawVersion = "0.0.0-dev.$shortSha"
-          }
-
-          # Sanitize filename-safe version and extract numeric X.Y.Z.W for PE VersionInfo
-          $safeVersion = ($rawVersion -replace '[^0-9A-Za-z._-]', '-')
-          if ($rawVersion -match '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?') {
-            $patch4 = if ($Matches[4]) { $Matches[4] } else { '0' }
-            $numericVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).$patch4"
-          } else {
-            $numericVersion = '0.0.0.0'
-          }
-
-          "app_version=$safeVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "numeric_version=$numericVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "Resolved version: $safeVersion (numeric: $numericVersion)"
 
       - name: Run regression tests
         shell: powershell
@@ -62,63 +34,28 @@ jobs:
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Launcher.ps1
 
-      - name: Ensure Inno Setup is available
+      - name: Stage runtime files
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-          if (-not $iscc) {
-            $defaultPath = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
-            if (Test-Path $defaultPath) {
-              "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            } else {
-              choco install innosetup --no-progress -y
-              "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            }
-          }
+          New-Item -ItemType Directory -Path app-dist -Force | Out-Null
+          Copy-Item -LiteralPath .\GameLauncher.exe -Destination app-dist\GameLauncher.exe
+          Get-ChildItem app-dist
 
-      - name: Build Windows installer (.exe)
-        shell: powershell
+      - name: Make sure the release exists
+        if: github.ref_type == 'tag'
+        shell: bash
         env:
-          APP_VERSION: ${{ steps.version.outputs.app_version }}
-          NUMERIC_VERSION: ${{ steps.version.outputs.numeric_version }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Path 'installers' -Force | Out-Null
-          $outputBase = "discord-quest-launcher-$($env:APP_VERSION)-windows-x64"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes --title "$TAG"
 
-          ISCC.exe `
-            "/DAppVersion=$($env:APP_VERSION)" `
-            "/DAppNumericVersion=$($env:NUMERIC_VERSION)" `
-            "/DOutputBaseName=$outputBase" `
-            "installer\DiscordQuestLauncher.iss"
-
-          Get-ChildItem -Path 'installers'
-
-      - name: Upload installers artifact
-        uses: actions/upload-artifact@v4
+      - name: Pack and attach the setup
+        uses: projectGloria/GloriaSetup@v0.1.0
         with:
-          name: installers
-          path: installers/*
-          if-no-files-found: error
-
-  release:
-    name: Create GitHub Release
-    needs: build-windows
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download installers artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: installers
-          path: installers
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: installers/*
-          generate_release_notes: true
+          app-dir: app-dist
+          manifest: gloria.toml
+          version: ${{ inputs.version }}
+          certificate: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          certificate-password: ${{ secrets.WINDOWS_PFX_PASSWORD }}
