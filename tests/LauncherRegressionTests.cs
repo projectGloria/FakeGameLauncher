@@ -49,6 +49,7 @@ public static class LauncherRegressionTests
         {
             Set(Database, "_initStarted", true);
             Set(Database, "_initializationCompleted", true);
+            Set(QuestDatabase.Instance, "_initStarted", true);
             AtomicPersistence();
             DetectionPaths();
             GameHistory();
@@ -64,6 +65,7 @@ public static class LauncherRegressionTests
             TestQueueSimulation();
             SearchDropdownLayout();
             SearchLightDismiss();
+            QuestExplorerTests();
             Console.WriteLine("PASS: " + checks + " application regression assertions");
             return 0;
         }
@@ -108,6 +110,9 @@ public static class LauncherRegressionTests
         Database.OnDatabaseUpdated -= (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(MainForm).GetMethod("OnDatabaseLoaded", Private));
         Database.OnInitializationCompleted -= (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(MainForm).GetMethod("OnDatabaseLoaded", Private));
         Database.OnQualifiedGamesChanged -= (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(MainForm).GetMethod("OnQualifiedGamesUpdated", Private));
+        QuestDatabase.Instance.OnQuestsUpdated -= (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(MainForm).GetMethod("OnQuestsCatalogUpdated", Private));
+        QuestsPanel qp = (QuestsPanel)MainField(form, "questsPanel");
+        if (qp != null && !qp.IsDisposed) qp.Dispose();
         foreach (string timer in new string[] { "timerQualification", "timerUIUpdate", "timerHoverCheck", "debounceSearchTimer", "debounceExtraSearchTimer" })
             ((System.Windows.Forms.Timer)MainField(form, timer)).Dispose();
         ((NotifyIcon)MainField(form, "trayIcon")).Dispose();
@@ -876,5 +881,252 @@ public static class LauncherRegressionTests
         }
         finally { DisposeForm(form); }
         Check(!(bool)MainField(form, "_outsideClickFilterActive"), "disposing with search open unregisters the message filter");
+    }
+
+    private static void QuestExplorerTests()
+    {
+        Check(QuestDatabase.ParseCloudflareTraceCountry("fl=1\nloc=GB\ntls=TLSv1.3\n") == "UK",
+            "cloudflare trace parses loc=GB and normalizes to UK");
+        Check(QuestDatabase.NormalizeCountryCode("gb") == "UK", "country normalization maps gb to UK");
+
+        DateTimeOffset now = new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero);
+        string tSoonStart = now.AddDays(-2).ToString("o");
+        string tSoonEnd = now.AddHours(24).ToString("o");
+        string tLaterStart = now.AddDays(-1).ToString("o");
+        string tLaterEnd = now.AddDays(10).ToString("o");
+        string tOldStart = now.AddDays(-20).ToString("o");
+        string tOldEnd = now.AddDays(-5).ToString("o");
+
+        string sampleQuestJson = "["
+            + "{\"id\":\"q_desktop\",\"starts_at\":\"" + tSoonStart + "\",\"expires_at\":\"" + tSoonEnd + "\","
+            + "\"application\":{\"id\":\"app_match_1\",\"name\":\"Apex Legends\",\"link\":\"https://example.com\"},"
+            + "\"assets\":{\"game_tile_dark\":\"PLACEHOLDER\",\"hero\":\"quests/q_desktop/hero.jpg\"},"
+            + "\"messages\":{\"quest_name\":\"Apex Orbs\",\"game_title\":\"Apex Legends\",\"game_publisher\":\"EA\"},"
+            + "\"task_config_v2\":{\"tasks\":{\"PLAY_ON_DESKTOP\":{\"type\":\"PLAY_ON_DESKTOP\",\"target\":900,\"applications\":[{\"id\":\"app_match_1\"}]},\"PLAY_ON_PLAYSTATION\":{\"type\":\"PLAY_ON_PLAYSTATION\",\"target\":900}}},"
+            + "\"rewards_config\":{\"rewards\":[{\"type\":4,\"orb_quantity\":700,\"messages\":{\"name\":\"700 Orbs\"}}]}},"
+            + "{\"id\":\"q_video\",\"starts_at\":\"" + tLaterStart + "\",\"expires_at\":\"" + tLaterEnd + "\","
+            + "\"application\":{\"id\":\"app_vid_2\",\"name\":\"Valorant\",\"link\":\"\"},"
+            + "\"assets\":{\"game_tile_dark\":\"quests/q_video/tile.png\"},"
+            + "\"messages\":{\"quest_name\":\"Valorant Frame\",\"game_title\":\"Valorant\",\"game_publisher\":\"Riot Games\"},"
+            + "\"task_config_v2\":{\"tasks\":{\"WATCH_VIDEO\":{\"type\":\"WATCH_VIDEO\",\"target\":90}}},"
+            + "\"rewards_config\":{\"rewards\":[{\"type\":3,\"messages\":{\"name\":\"Riot Avatar Decoration\",\"redemption_instructions_by_platform\":{\"0\":\"\\\"Redeem in client.\\\"\"}}}]}},"
+            + "{\"id\":\"q_expired\",\"starts_at\":\"" + tOldStart + "\",\"expires_at\":\"" + tOldEnd + "\","
+            + "\"application\":{\"id\":\"app_old_3\",\"name\":\"Old Game\"},"
+            + "\"messages\":{\"quest_name\":\"Old Bundle\",\"game_title\":\"Old Game\",\"game_publisher\":\"OldPub\"},"
+            + "\"task_config_v2\":{\"tasks\":{\"ACHIEVEMENT_IN_ACTIVITY\":{\"type\":\"ACHIEVEMENT_IN_ACTIVITY\",\"target\":0}}},"
+            + "\"rewards_config\":{\"rewards\":[{\"type\":1,\"messages\":{\"name\":\"In-Game Code\"}}]}}"
+            + "]";
+
+        string sampleRegionJson = "{\"quests\":["
+            + "{\"id\":\"q_desktop\",\"show_age_gate\":true,\"is_global\":false,\"regions\":{\"include\":[\"UK\",\"DE\"],\"exclude\":[\"RU\"]}},"
+            + "{\"id\":\"q_video\",\"show_age_gate\":false,\"is_global\":false,\"regions\":[\"US\"]},"
+            + "{\"id\":\"q_expired\",\"show_age_gate\":false,\"is_global\":true,\"regions\":[]}"
+            + "]}";
+
+        List<QuestItem> parsed = QuestDatabase.ParseQuestCatalogJson(sampleQuestJson, sampleRegionJson);
+        Check(parsed.Count == 3, "parses all 3 quests from quest.json");
+
+        QuestItem qDesk = parsed[0];
+        QuestItem qVid = parsed[1];
+        QuestItem qExp = parsed[2];
+
+        Check(qDesk.HasDesktopTask && qDesk.DesktopTaskTargetSeconds == 900 && qDesk.HasOrbsReward && qDesk.IsAgeRestricted,
+            "desktop orbs quest task, reward, and age gate parsed");
+        Check(qDesk.IsActive(now) && qDesk.IsEndingSoon(now) && !qDesk.IsExpired(now),
+            "quest expiring within 24h is active and ending soon");
+        Check(qDesk.IsEligibleInRegion("GB") && qDesk.IsEligibleInRegion("DE") && !qDesk.IsEligibleInRegion("US") && !qDesk.IsEligibleInRegion("RU"),
+            "object region include/exclude and GB->UK normalization work");
+
+        Check(qVid.HasCollectibleReward && !qVid.HasDesktopTask && qVid.IsActive(now) && !qVid.IsEndingSoon(now),
+            "video collectible quest parsed and not ending soon");
+        Check(qVid.rewards[0].redemption_instructions == "Redeem in client.",
+            "redemption instructions strip outer quotes");
+        Check(qVid.IsEligibleInRegion("US") && !qVid.IsEligibleInRegion("UK"),
+            "array region allowlist parsed correctly");
+
+        Check(qExp.IsExpired(now) && !qExp.IsActive(now) && qExp.IsEligibleInRegion("TR"),
+            "expired global quest status and region check work");
+
+        HashSet<string> doneIds = new HashSet<string>(StringComparer.Ordinal) { "q_video" };
+        Check(QuestDatabase.FilterQuests(parsed, "active", "", false, "", false, doneIds, "ending_soon", now).Count == 2, "active filter returns 2");
+        Check(QuestDatabase.FilterQuests(parsed, "desktop", "", false, "", false, doneIds, "ending_soon", now).Count == 1, "desktop filter returns 1");
+        Check(QuestDatabase.FilterQuests(parsed, "ending", "", false, "", false, doneIds, "ending_soon", now).Count == 1, "ending filter returns 1");
+        Check(QuestDatabase.FilterQuests(parsed, "orbs", "", false, "", false, doneIds, "ending_soon", now).Count == 1, "orbs filter returns 1");
+        Check(QuestDatabase.FilterQuests(parsed, "collectibles", "", false, "", false, doneIds, "ending_soon", now).Count == 1, "collectibles filter returns 1");
+        Check(QuestDatabase.FilterQuests(parsed, "expired", "", false, "", false, doneIds, "ending_soon", now).Count == 1, "expired filter returns 1");
+        Check(QuestDatabase.FilterQuests(parsed, "done", "", false, "", false, doneIds, "ending_soon", now).Count == 1, "done filter returns 1");
+        Check(QuestDatabase.FilterQuests(parsed, "all", "", false, "", false, doneIds, "ending_soon", now).Count == 3, "all filter returns 3");
+        Check(QuestDatabase.FilterQuests(parsed, "active", "riot", false, "", false, doneIds, "ending_soon", now).Count == 1, "search matches publisher");
+        Check(QuestDatabase.FilterQuests(parsed, "active", "", true, "GB", false, doneIds, "ending_soon", now).Count == 1, "region filter with GB keeps UK quest only");
+        Check(QuestDatabase.FilterQuests(parsed, "active", "", false, "", true, doneIds, "ending_soon", now).Count == 1, "hideCompleted hides q_video");
+
+        List<QuestItem> byName = QuestDatabase.FilterQuests(parsed, "active", "", false, "", false, doneIds, "name", now);
+        Check(byName[0].id == "q_desktop" && byName[1].id == "q_video", "sort by name orders alphabetically");
+        List<QuestItem> byNewest = QuestDatabase.FilterQuests(parsed, "active", "", false, "", false, doneIds, "newest", now);
+        Check(byNewest[0].id == "q_video" && byNewest[1].id == "q_desktop", "sort by newest orders latest starts_at first");
+
+        // Deduplicate regional + global variants when country filter is active and flag as alsoGlobal
+        List<QuestItem> dupList = new List<QuestItem>
+        {
+            new QuestItem { id = "q_dup_global", quest_name = "Illegal Soccer", application_id = "363445", expires_at = tSoonEnd, region = null },
+            new QuestItem { id = "q_dup_uk", quest_name = "Illegal Soccer", application_id = "363445", expires_at = tSoonEnd, region = new QuestRegionInfo { is_global = false, include = new List<string> { "UK" } } }
+        };
+        HashSet<string> alsoGlobal;
+        List<QuestItem> dedupUk = QuestDatabase.FilterQuests(dupList, "active", "", true, "UK", false, doneIds, "ending_soon", now, out alsoGlobal);
+        Check(dedupUk.Count == 1 && dedupUk[0].id == "q_dup_uk" && alsoGlobal.Contains("q_dup_uk"),
+            "UK region filter merges global+UK duplicates into single UK quest marked alsoGlobal");
+        HashSet<string> noGlobal;
+        List<QuestItem> allVariants = QuestDatabase.FilterQuests(dupList, "active", "", false, "UK", false, doneIds, "ending_soon", now, out noGlobal);
+        Check(allVariants.Count == 2 && noGlobal.Count == 0, "unfiltered view preserves all regional variants");
+
+        // Local state persistence round-trip
+        QuestDatabase.Instance.SetQuestsForTesting(parsed, "GB");
+        bool nowDone = QuestDatabase.Instance.ToggleCompleted("q_desktop");
+        Check(nowDone && QuestDatabase.Instance.IsCompleted("q_desktop") && File.Exists(QuestDatabase.Instance.StateFilePath),
+            "ToggleCompleted persists quest_state.json");
+        ((HashSet<string>)Field(QuestDatabase.Instance, "_completedIds")).Clear();
+        QuestDatabase.Instance.LoadUserState();
+        Check(QuestDatabase.Instance.IsCompleted("q_desktop"), "LoadUserState restores completed IDs from disk");
+        QuestDatabase.Instance.ToggleCompleted("q_desktop"); // toggle back clean
+
+        // GameDatabase resolution by application.id + fallback
+        lock (Field(Database, "_lock"))
+        {
+            List<GameItem> games = (List<GameItem>)Field(Database, "_games");
+            games.Add(Game("app_match_1", "Apex Legends", "r5apex.exe"));
+        }
+        GameItem matched = QuestDatabase.Instance.ResolveGameForQuest(qDesk);
+        Check(matched != null && matched.id == "app_match_1" && matched.exe == "r5apex.exe",
+            "ResolveGameForQuest matches detectable game by application.id");
+        GameItem fallback = QuestDatabase.Instance.ResolveGameForQuest(new QuestItem { application_id = "unlisted_99", application_name = "My Cool Game" });
+        Check(fallback != null && fallback.exe == "MyCoolGame.exe",
+            "ResolveGameForQuest infers executable when application.id is unlisted");
+
+        // Flag icons & auto-filtering when selecting a country
+        Check(FlagIcons.GetFlag("US").Size == new Size(18, 12), "US flag is 18x12");
+        Check(FlagIcons.GetFlag("ES").Size == new Size(18, 12), "ES flag is 18x12");
+        Check(object.ReferenceEquals(FlagIcons.GetFlag("GB"), FlagIcons.GetFlag("UK")), "GB flag normalizes to UK flag");
+        Check(FlagIcons.GetGlobeIcon().Size == new Size(18, 12), "globe icon is 18x12");
+
+        // Simulation sync: matches active quest without auto-marking Done, and clears cleanly
+        Check(QuestDatabase.DoesQuestMatchGame(qDesk, matched), "DoesQuestMatchGame matches desktop quest by application.id");
+        Check(QuestDatabase.DoesQuestMatchGame(qDesk, Game("", "Apex Legends", "apex.exe")), "DoesQuestMatchGame matches desktop quest by game name fallback");
+        Check(!QuestDatabase.DoesQuestMatchGame(qVid, Game("app_vid_2", "Valorant", "valorant.exe")), "DoesQuestMatchGame ignores non-desktop quests");
+        Check(QuestDatabase.Instance.GetActiveDesktopQuestTargetSeconds(matched, now) == 900,
+            "GetActiveDesktopQuestTargetSeconds returns 900s for active uncompleted desktop quest");
+
+        List<string> done1 = QuestDatabase.Instance.UpdateActiveSimulationProgress(new List<GameItem> { matched }, 900, now);
+        Check(done1.Count == 0 && QuestDatabase.Instance.IsQuestSimulating("q_desktop") &&
+              !QuestDatabase.Instance.IsCompleted("q_desktop"),
+            "simulation sync marks quest as simulating without falsely auto-completing Done");
+
+        // QuestsForm UI + Simulate/Stop/Queue callbacks + Flag region selection + Paint + Disposal
+        using (QuestsForm qForm = new QuestsForm())
+        {
+            GameItem simGame = null;
+            GameItem stopGame = null;
+            GameItem queuedGame = null;
+            qForm.SimulateRequested += g => simGame = g;
+            qForm.StopSimulateRequested += g => stopGame = g;
+            qForm.QueueRequested += g => queuedGame = g;
+            qForm.SetFiltersForTesting("all", "", false, false, "ending_soon");
+            qForm.Show();
+            Application.DoEvents();
+            using (Bitmap bmp = new Bitmap(qForm.Width, qForm.Height))
+                qForm.DrawToBitmap(bmp, new Rectangle(0, 0, qForm.Width, qForm.Height));
+
+            QuestsPanel panel = (QuestsPanel)Field(qForm, "_panel");
+            QuestGridControl grid = (QuestGridControl)Field(panel, "_grid");
+            panel.SelectRegionOverride("ES");
+            Application.DoEvents();
+            List<QuestItem> esQuests = (List<QuestItem>)Field(grid, "_quests");
+            int[] esCounts = (int[])Field(panel, "_catCounts");
+            Check((bool)Field(panel, "_filterRegionOnly") && esQuests.Count == 1 && esQuests[0].id == "q_expired" && esCounts[0] == 0,
+                "selecting ES flag enables region filter, shows only ES-eligible quests, and updates region-aware counts");
+
+            panel.SelectRegionOverride("US");
+            Application.DoEvents();
+            List<QuestItem> usQuests = (List<QuestItem>)Field(grid, "_quests");
+            int[] usCounts = (int[])Field(panel, "_catCounts");
+            Check((bool)Field(panel, "_filterRegionOnly") && usQuests.Count == 2 && usCounts[0] == 1,
+                "selecting US flag enables region filter and updates region-aware active pill count");
+
+            panel.SelectAllRegions();
+            Application.DoEvents();
+            List<QuestItem> allRegionQuests = (List<QuestItem>)Field(grid, "_quests");
+            Check(!(bool)Field(panel, "_filterRegionOnly") && allRegionQuests.Count == 3,
+                "selecting All Regions disables region filter and shows all quests");
+
+            qForm.OpenDetailForTesting(qDesk);
+            Application.DoEvents();
+            using (Bitmap bmpDetail = new Bitmap(qForm.Width, qForm.Height))
+                qForm.DrawToBitmap(bmpDetail, new Rectangle(0, 0, qForm.Width, qForm.Height));
+
+            panel.HandleSimulateQuest(qDesk);
+            panel.HandleStopSimulateQuest(qDesk);
+            panel.HandleQueueQuest(qDesk);
+            Check(simGame != null && simGame.exe == "r5apex.exe", "QuestsForm SimulateRequested emits resolved GameItem");
+            Check(stopGame != null && stopGame.exe == "r5apex.exe", "QuestsForm StopSimulateRequested emits resolved GameItem");
+            Check(queuedGame != null && queuedGame.exe == "r5apex.exe", "QuestsForm QueueRequested emits resolved GameItem");
+
+            // Resize hit-testing: child grid passes bottom-right corner through (HTTRANSPARENT) to QuestsForm
+            Point cornerScreen = qForm.PointToScreen(new Point(qForm.ClientSize.Width - 2, qForm.ClientSize.Height - 2));
+            IntPtr cornerLParam = (IntPtr)(((cornerScreen.Y & 0xFFFF) << 16) | (cornerScreen.X & 0xFFFF));
+            System.Windows.Forms.Message gridHit = System.Windows.Forms.Message.Create(grid.Handle, 0x0084, IntPtr.Zero, cornerLParam);
+            object[] hitArgs = new object[] { grid, gridHit };
+            Check((bool)typeof(QuestsForm).GetMethod("TryForwardResizeHitTest", BindingFlags.Public | BindingFlags.Static).Invoke(null, hitArgs) &&
+                  ((System.Windows.Forms.Message)hitArgs[1]).Result == (IntPtr)(-1),
+                "QuestGridControl forwards edge WM_NCHITTEST as HTTRANSPARENT (-1)");
+
+            qForm.Close();
+        }
+
+        // Verify MainForm.OnQuestSimulateRequested launches simulation, btnAction stays inside left 420px column when docked, and Stop syncs
+        TestForm hostForm = new TestForm();
+        try
+        {
+            hostForm.Show();
+            Application.DoEvents();
+            Rectangle qBtn = (Rectangle)MainField(hostForm, "QuestsBtnRect");
+            Check(qBtn.Top < 38, "Quests button sits in top-left header away from bottom status text");
+
+            Call(hostForm, "OnQuestSimulateRequested", matched);
+            Check(hostForm.LaunchCount == 1 && hostForm.LaunchId == "app_match_1",
+                "OnQuestSimulateRequested selects and launches simulation for the quest game");
+            Call(hostForm, "OnQuestQueueRequested", matched);
+            List<QueueItem> hostQueue = (List<QueueItem>)MainField(hostForm, "queueItems");
+            Check(hostQueue.Count == 1 && hostQueue[0].Game.id == "app_match_1" && hostQueue[0].PlannedPlaySeconds >= 960,
+                "OnQuestQueueRequested adds quest game to queue with smart duration >= target + buffer");
+
+            // Unified single-window expansion & collapse (0px gap) + btnAction remains centered in left 420px column
+            typeof(MainForm).GetMethod("OpenQuestsWindow", Private).Invoke(hostForm, new object[] { });
+            Application.DoEvents();
+            QuestsPanel dockedPanel = (QuestsPanel)MainField(hostForm, "questsPanel");
+            PillActionButton actionBtn = (PillActionButton)MainField(hostForm, "btnAction");
+            actionBtn.SetRunningState(true);
+            Check((bool)MainField(hostForm, "isQuestsDocked") && dockedPanel != null && dockedPanel.Visible &&
+                  hostForm.ClientSize.Width >= 1140 && dockedPanel.Left == 421 &&
+                  actionBtn.Left >= 0 && actionBtn.Right <= 420,
+                "OpenQuestsWindow expands MainForm into unified window while keeping Launch/Stop button centered in left 420px column");
+
+            // Simulate bidirectional Stop sync when activeSimulatingGame matches
+            MainSet(hostForm, "isSimulatingMode", true);
+            MainSet(hostForm, "activeSimulatingGame", matched);
+            Call(hostForm, "SyncActiveQuestsProgress", 0);
+            Check(QuestDatabase.Instance.IsQuestSimulating("q_desktop"), "SyncActiveQuestsProgress marks matching quest as simulating");
+            Call(hostForm, "OnQuestStopRequested", matched);
+            Check(!((bool)MainField(hostForm, "isSimulatingMode")) && !QuestDatabase.Instance.IsQuestSimulating("q_desktop"),
+                "OnQuestStopRequested stops active simulation and clears simulating state on quest card");
+
+            typeof(MainForm).GetMethod("OpenQuestsWindow", Private).Invoke(hostForm, new object[] { });
+            Application.DoEvents();
+            Check(!(bool)MainField(hostForm, "isQuestsDocked") && !dockedPanel.Visible &&
+                  hostForm.ClientSize.Width == 420 && hostForm.ClientSize.Height == 480,
+                "clicking Quests again collapses MainForm back to 420x480");
+        }
+        finally { DisposeForm(hostForm); }
+
+        QuestDatabase.Instance.ClearActiveSimulation();
+        Check(!QuestDatabase.Instance.IsQuestSimulating("q_desktop"), "ClearActiveSimulation clears simulating state");
     }
 }

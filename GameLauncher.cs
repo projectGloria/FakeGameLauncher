@@ -437,6 +437,8 @@ namespace DiscordQuestLauncher
         private static Font _smallFont;
         private static Font _listExeFont;
         private static Font _queueTinyFont;
+        private static Font _cardTitleFont;
+        private static Font _badgeFont;
 
         public static Font NameFont
         {
@@ -478,6 +480,16 @@ namespace DiscordQuestLauncher
         public static Font QueueTinyFont
         {
             get { return _queueTinyFont ?? (_queueTinyFont = ResolveFont(new string[] { "Geist Mono", "JetBrains Mono", "Cascadia Code", "Consolas" }, 7.25f, FontStyle.Bold)); }
+        }
+
+        public static Font CardTitleFont
+        {
+            get { return _cardTitleFont ?? (_cardTitleFont = ResolveFont(new string[] { "Inter", "Geist", "Segoe UI" }, 10.5f, FontStyle.Bold)); }
+        }
+
+        public static Font BadgeFont
+        {
+            get { return _badgeFont ?? (_badgeFont = ResolveFont(new string[] { "Inter", "Geist", "Segoe UI" }, 8f, FontStyle.Bold)); }
         }
 
         private static Font ResolveFont(string[] familyNames, float size, FontStyle style)
@@ -573,6 +585,342 @@ namespace DiscordQuestLauncher
     {
         public long cached_at { get; set; }
         public List<GameItem> games { get; set; }
+    }
+
+    /// <summary>
+    /// Represents a single task requirement inside a Discord Quest (e.g. PLAY_ON_DESKTOP, WATCH_VIDEO).
+    /// </summary>
+    public class QuestTaskInfo
+    {
+        public string type { get; set; }
+        public int target { get; set; }
+        public string application_id { get; set; }
+
+        public bool IsDesktopPlay
+        {
+            get { return string.Equals(type, "PLAY_ON_DESKTOP", StringComparison.OrdinalIgnoreCase); }
+        }
+
+        public string GetDisplayLabel()
+        {
+            string kind;
+            string t = (type ?? "").ToUpperInvariant();
+            if (t == "PLAY_ON_DESKTOP") kind = "Desktop";
+            else if (t == "WATCH_VIDEO") kind = "Video";
+            else if (t == "WATCH_VIDEO_ON_MOBILE") kind = "Mobile Video";
+            else if (t == "PLAY_ON_PLAYSTATION") kind = "PlayStation";
+            else if (t == "PLAY_ON_XBOX") kind = "Xbox";
+            else if (t == "ACHIEVEMENT_IN_ACTIVITY") kind = "Activity";
+            else kind = string.IsNullOrEmpty(t) ? "Task" : t.Replace('_', ' ');
+
+            if (target <= 0) return kind;
+            return kind + " \u00B7 " + FormatDuration(target);
+        }
+
+        public static string FormatDuration(int seconds)
+        {
+            if (seconds < 60) return seconds + "s";
+            int mins = seconds / 60;
+            int rem = seconds % 60;
+            if (rem == 0) return mins + "m";
+            return mins + "m " + rem + "s";
+        }
+    }
+
+    /// <summary>
+    /// Represents a reward granted by completing a Discord Quest.
+    /// </summary>
+    public class QuestRewardInfo
+    {
+        public int type { get; set; }
+        public string name { get; set; }
+        public int orb_quantity { get; set; }
+        public string asset { get; set; }
+        public string redemption_instructions { get; set; }
+
+        public bool IsOrbs
+        {
+            get { return type == 4 || orb_quantity > 0; }
+        }
+
+        public bool IsCollectible
+        {
+            get { return type == 3; }
+        }
+
+        public string GetTypeLabel()
+        {
+            if (IsOrbs) return "Discord Orbs";
+            if (IsCollectible) return "Collectible";
+            if (type == 1) return "In-Game Reward";
+            return "Reward";
+        }
+    }
+
+    /// <summary>
+    /// Regional eligibility and age-gate metadata merged from the region tracker gist.
+    /// </summary>
+    public class QuestRegionInfo
+    {
+        public bool show_age_gate { get; set; }
+        public bool is_global { get; set; }
+        public List<string> include { get; set; }
+        public List<string> exclude { get; set; }
+    }
+
+    /// <summary>
+    /// Normalized Discord Quest catalog entry combining quest.json and regional eligibility metadata.
+    /// </summary>
+    public class QuestItem
+    {
+        public string id { get; set; }
+        public string quest_name { get; set; }
+        public string game_title { get; set; }
+        public string game_publisher { get; set; }
+        public string application_id { get; set; }
+        public string application_name { get; set; }
+        public string application_link { get; set; }
+        public string starts_at { get; set; }
+        public string expires_at { get; set; }
+        public string hero_asset { get; set; }
+        public string tile_asset { get; set; }
+        public List<QuestTaskInfo> tasks { get; set; }
+        public List<QuestRewardInfo> rewards { get; set; }
+        public QuestRegionInfo region { get; set; }
+
+        public DateTimeOffset StartsAtUtc
+        {
+            get
+            {
+                DateTimeOffset dto;
+                if (!string.IsNullOrEmpty(starts_at) && DateTimeOffset.TryParse(starts_at, out dto))
+                    return dto.ToUniversalTime();
+                return DateTimeOffset.MinValue;
+            }
+        }
+
+        public DateTimeOffset ExpiresAtUtc
+        {
+            get
+            {
+                DateTimeOffset dto;
+                if (!string.IsNullOrEmpty(expires_at) && DateTimeOffset.TryParse(expires_at, out dto))
+                    return dto.ToUniversalTime();
+                return DateTimeOffset.MinValue;
+            }
+        }
+
+        public string DisplayTitle
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(quest_name)) return quest_name;
+                if (!string.IsNullOrWhiteSpace(game_title)) return game_title;
+                if (!string.IsNullOrWhiteSpace(application_name)) return application_name;
+                return "Discord Quest";
+            }
+        }
+
+        public string DisplayGameName
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(game_title)) return game_title;
+                if (!string.IsNullOrWhiteSpace(application_name)) return application_name;
+                return DisplayTitle;
+            }
+        }
+
+        public bool IsExpired(DateTimeOffset nowUtc)
+        {
+            DateTimeOffset exp = ExpiresAtUtc;
+            if (exp == DateTimeOffset.MinValue) return false;
+            return exp <= nowUtc;
+        }
+
+        public bool IsActive(DateTimeOffset nowUtc)
+        {
+            DateTimeOffset exp = ExpiresAtUtc;
+            if (exp == DateTimeOffset.MinValue) return false;
+            return exp > nowUtc;
+        }
+
+        public bool IsEndingSoon(DateTimeOffset nowUtc)
+        {
+            if (!IsActive(nowUtc)) return false;
+            return (ExpiresAtUtc - nowUtc) <= TimeSpan.FromHours(72);
+        }
+
+        public bool HasDesktopTask
+        {
+            get
+            {
+                if (tasks == null) return false;
+                for (int i = 0; i < tasks.Count; i++)
+                {
+                    if (tasks[i] != null && tasks[i].IsDesktopPlay) return true;
+                }
+                return false;
+            }
+        }
+
+        public int DesktopTaskTargetSeconds
+        {
+            get
+            {
+                if (tasks == null) return 0;
+                for (int i = 0; i < tasks.Count; i++)
+                {
+                    if (tasks[i] != null && tasks[i].IsDesktopPlay) return tasks[i].target;
+                }
+                return 0;
+            }
+        }
+
+        public string DesktopApplicationId
+        {
+            get
+            {
+                if (tasks != null)
+                {
+                    for (int i = 0; i < tasks.Count; i++)
+                    {
+                        if (tasks[i] != null && tasks[i].IsDesktopPlay && !string.IsNullOrEmpty(tasks[i].application_id))
+                            return tasks[i].application_id;
+                    }
+                }
+                return application_id ?? "";
+            }
+        }
+
+        public bool HasOrbsReward
+        {
+            get
+            {
+                if (rewards == null) return false;
+                for (int i = 0; i < rewards.Count; i++)
+                {
+                    if (rewards[i] != null && rewards[i].IsOrbs) return true;
+                }
+                return false;
+            }
+        }
+
+        public bool HasCollectibleReward
+        {
+            get
+            {
+                if (rewards == null) return false;
+                for (int i = 0; i < rewards.Count; i++)
+                {
+                    if (rewards[i] != null && rewards[i].IsCollectible) return true;
+                }
+                return false;
+            }
+        }
+
+        public bool IsAgeRestricted
+        {
+            get { return region != null && region.show_age_gate; }
+        }
+
+        public bool IsEligibleInRegion(string countryCode)
+        {
+            string norm = QuestDatabase.NormalizeCountryCode(countryCode);
+            if (string.IsNullOrEmpty(norm)) return true;
+            if (region == null) return true;
+            if (region.exclude != null && region.exclude.Contains(norm)) return false;
+            if (region.is_global) return true;
+            if (region.include != null && region.include.Count > 0) return region.include.Contains(norm);
+            return true;
+        }
+
+        public string GetRegionSummary()
+        {
+            if (region == null) return "Global";
+            if (region.is_global)
+            {
+                if (region.exclude != null && region.exclude.Count > 0)
+                    return "Global (excl. " + FormatCountryPreview(region.exclude, 2) + ")";
+                return "Global";
+            }
+            if (region.include != null && region.include.Count > 0)
+                return "Allowed: " + FormatCountryPreview(region.include, 3);
+            if (region.exclude != null && region.exclude.Count > 0)
+                return "Excluded: " + FormatCountryPreview(region.exclude, 2);
+            return "Global";
+        }
+
+        private static string FormatCountryPreview(List<string> list, int maxItems)
+        {
+            if (list == null || list.Count == 0) return "";
+            int take = Math.Min(maxItems, list.Count);
+            string[] slice = new string[take];
+            for (int i = 0; i < take; i++) slice[i] = list[i];
+            string text = string.Join(", ", slice);
+            if (list.Count > take) text += " +" + (list.Count - take);
+            return text;
+        }
+
+        public string GetCountdownLabel(DateTimeOffset nowUtc)
+        {
+            DateTimeOffset exp = ExpiresAtUtc;
+            if (exp == DateTimeOffset.MinValue) return "Unknown";
+            TimeSpan diff = exp - nowUtc;
+            if (diff.TotalSeconds <= 0) return "Expired";
+            if (diff.TotalDays >= 1.0) return ((int)Math.Floor(diff.TotalDays)) + "d left";
+            if (diff.TotalHours >= 1.0) return ((int)Math.Floor(diff.TotalHours)) + "h left";
+            int mins = Math.Max(1, (int)Math.Floor(diff.TotalMinutes));
+            return mins + "m left";
+        }
+
+        public string GetPrimaryRewardLabel()
+        {
+            if (rewards == null || rewards.Count == 0 || rewards[0] == null) return "Reward";
+            if (!string.IsNullOrWhiteSpace(rewards[0].name)) return rewards[0].name;
+            if (rewards[0].orb_quantity > 0) return rewards[0].orb_quantity + " Orbs";
+            return rewards[0].GetTypeLabel();
+        }
+
+        public string GetPrimaryTaskLabel()
+        {
+            if (tasks == null || tasks.Count == 0) return "Quest";
+            for (int i = 0; i < tasks.Count; i++)
+            {
+                if (tasks[i] != null && tasks[i].IsDesktopPlay) return tasks[i].GetDisplayLabel();
+            }
+            return tasks[0] != null ? tasks[0].GetDisplayLabel() : "Quest";
+        }
+
+        public string GetDiscordQuestUrl()
+        {
+            return string.IsNullOrEmpty(id) ? "https://discord.com/quests" : ("https://discord.com/quests/" + id);
+        }
+
+        public string GetThumbnailAssetPath()
+        {
+            if (!string.IsNullOrEmpty(tile_asset) && !string.Equals(tile_asset, "PLACEHOLDER", StringComparison.OrdinalIgnoreCase))
+                return tile_asset;
+            if (!string.IsNullOrEmpty(hero_asset) && !string.Equals(hero_asset, "PLACEHOLDER", StringComparison.OrdinalIgnoreCase))
+                return hero_asset;
+            return null;
+        }
+    }
+
+    public class QuestUserState
+    {
+        public List<string> completed_ids { get; set; }
+        public Dictionary<string, int> progress_seconds { get; set; }
+        public string region_override { get; set; }
+        public bool filter_region_only { get; set; }
+        public bool hide_completed { get; set; }
+    }
+
+    public class QuestCacheEnvelope
+    {
+        public long cached_at { get; set; }
+        public string quests_json { get; set; }
+        public string regions_json { get; set; }
     }
 
     #endregion
@@ -1369,15 +1717,19 @@ namespace DiscordQuestLauncher
             return path;
         }
 
+        public GameItem FindById(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return null;
+            lock (_lock)
+            {
+                return _games.Find(x => string.Equals(x.id, id, StringComparison.Ordinal));
+            }
+        }
+
         public GameItem ResolveGameMetadata(GameItem game)
         {
             if (game == null || string.IsNullOrEmpty(game.id)) return game;
-            lock (_lock)
-            {
-                // History and last selection can predate a database refresh. Resolve by ID, never title.
-                GameItem current = _games.Find(x => x.id == game.id);
-                return current ?? game;
-            }
+            return FindById(game.id) ?? game;
         }
 
         public static string NormalizeString(string s)
@@ -1818,6 +2170,979 @@ namespace DiscordQuestLauncher
 
     #endregion
 
+    #region Quest Database
+
+    /// <summary>
+    /// Manages the Discord Quests catalog, regional eligibility metadata, detected country, and local checklist state.
+    /// </summary>
+    public class QuestDatabase
+    {
+        public const string QuestFeedUrl = "https://raw.githubusercontent.com/xGustavvo/discord-api-tracker/refs/heads/main/quest.json";
+        public const string RegionFeedUrl = "https://gist.githubusercontent.com/xGustavvo/3d08b7369eb34b50834815fd43176cae/raw";
+        public const string GeoTraceUrl = "https://www.cloudflare.com/cdn-cgi/trace";
+
+        private static QuestDatabase _instance;
+        public static QuestDatabase Instance
+        {
+            get
+            {
+                if (_instance == null) _instance = new QuestDatabase();
+                return _instance;
+            }
+        }
+
+        private readonly object _lock = new object();
+        private List<QuestItem> _quests = new List<QuestItem>();
+        private HashSet<string> _completedIds = new HashSet<string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, int> _progressSeconds = new Dictionary<string, int>(StringComparer.Ordinal);
+        private readonly HashSet<string> _simulatingQuestIds = new HashSet<string>(StringComparer.Ordinal);
+        private string _detectedCountry = "";
+        private string _regionOverride = "";
+        private bool _filterRegionOnly = false;
+        private bool _hideCompleted = false;
+        private DateTime _lastUpdatedUtc = DateTime.MinValue;
+        private bool _initStarted = false;
+        private bool _isUpdating = false;
+        private bool _stateLoaded = false;
+
+        public event Action OnQuestsUpdated;
+        public event Action OnStateChanged;
+        public event Action OnProgressUpdated;
+
+        public string CacheFilePath
+        {
+            get { return Path.Combine(GameDatabase.Instance.CacheDirectory, "quests_cache.json"); }
+        }
+
+        public string StateFilePath
+        {
+            get { return Path.Combine(GameDatabase.Instance.CacheDirectory, "quest_state.json"); }
+        }
+
+        public bool IsUpdating
+        {
+            get { lock (_lock) return _isUpdating; }
+        }
+
+        public DateTime LastUpdatedUtc
+        {
+            get { lock (_lock) return _lastUpdatedUtc; }
+        }
+
+        public string DetectedCountry
+        {
+            get { lock (_lock) return _detectedCountry; }
+        }
+
+        public string RegionOverride
+        {
+            get { lock (_lock) return _regionOverride; }
+        }
+
+        public string EffectiveCountry
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    if (!string.IsNullOrEmpty(_regionOverride)) return _regionOverride;
+                    return _detectedCountry;
+                }
+            }
+        }
+
+        public bool FilterRegionOnly
+        {
+            get { lock (_lock) return _filterRegionOnly; }
+        }
+
+        public bool HideCompleted
+        {
+            get { lock (_lock) return _hideCompleted; }
+        }
+
+        public int Count
+        {
+            get { lock (_lock) return _quests.Count; }
+        }
+
+        public List<QuestItem> GetQuestsSnapshot()
+        {
+            lock (_lock) return new List<QuestItem>(_quests);
+        }
+
+        public int GetActiveCount(DateTimeOffset nowUtc)
+        {
+            int active = 0;
+            lock (_lock)
+            {
+                for (int i = 0; i < _quests.Count; i++)
+                {
+                    if (_quests[i] != null && _quests[i].IsActive(nowUtc)) active++;
+                }
+            }
+            return active;
+        }
+
+        public void Initialize()
+        {
+            lock (_lock)
+            {
+                if (_initStarted) return;
+                _initStarted = true;
+            }
+            ThreadPool.QueueUserWorkItem(_ => LoadInitialData());
+        }
+
+        private void LoadInitialData()
+        {
+            EnsureStateLoaded();
+            bool needRefresh = true;
+            try
+            {
+                if (File.Exists(CacheFilePath))
+                {
+                    string json = File.ReadAllText(CacheFilePath);
+                    if (!string.IsNullOrWhiteSpace(json))
+                    {
+                        JavaScriptSerializer ser = new JavaScriptSerializer();
+                        ser.MaxJsonLength = int.MaxValue;
+                        QuestCacheEnvelope env = ser.Deserialize<QuestCacheEnvelope>(json);
+                        if (env != null && !string.IsNullOrWhiteSpace(env.quests_json))
+                        {
+                            List<QuestItem> parsed = ParseQuestCatalogJson(env.quests_json, env.regions_json);
+                            if (parsed.Count > 0)
+                            {
+                                DateTime cachedAt = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(env.cached_at);
+                                lock (_lock)
+                                {
+                                    _quests = parsed;
+                                    _lastUpdatedUtc = cachedAt;
+                                }
+                                needRefresh = (DateTime.UtcNow - cachedAt) > TimeSpan.FromMinutes(15);
+                                NotifyQuestsUpdated();
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Program.LogError("QuestCacheLoad", ex); }
+
+            if (needRefresh) RefreshAsync(false);
+        }
+
+        public void RefreshAsync(bool force)
+        {
+            lock (_lock)
+            {
+                if (_isUpdating) return;
+                if (!force && _lastUpdatedUtc != DateTime.MinValue && (DateTime.UtcNow - _lastUpdatedUtc) < TimeSpan.FromMinutes(2))
+                    return;
+                _isUpdating = true;
+            }
+            NotifyQuestsUpdated();
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    EnsureStateLoaded();
+                    string questJson = null;
+                    string regionJson = null;
+                    string traceText = null;
+
+                    using (ManualResetEvent done = new ManualResetEvent(false))
+                    {
+                        int pending = 3;
+                        ThreadPool.QueueUserWorkItem(__ =>
+                        {
+                            try
+                            {
+                                byte[] data = IconCache.DownloadBytes(QuestFeedUrl, 10);
+                                if (data != null) questJson = Encoding.UTF8.GetString(data);
+                            }
+                            catch { }
+                            finally { if (Interlocked.Decrement(ref pending) == 0) done.Set(); }
+                        });
+                        ThreadPool.QueueUserWorkItem(__ =>
+                        {
+                            try
+                            {
+                                byte[] data = IconCache.DownloadBytes(RegionFeedUrl, 10);
+                                if (data != null) regionJson = Encoding.UTF8.GetString(data);
+                            }
+                            catch { }
+                            finally { if (Interlocked.Decrement(ref pending) == 0) done.Set(); }
+                        });
+                        ThreadPool.QueueUserWorkItem(__ =>
+                        {
+                            try
+                            {
+                                byte[] data = IconCache.DownloadBytes(GeoTraceUrl, 4);
+                                if (data != null) traceText = Encoding.UTF8.GetString(data);
+                            }
+                            catch { }
+                            finally { if (Interlocked.Decrement(ref pending) == 0) done.Set(); }
+                        });
+                        done.WaitOne(18000);
+                    }
+
+                    string detected = ParseCloudflareTraceCountry(traceText);
+                    if (!string.IsNullOrEmpty(detected))
+                    {
+                        lock (_lock) _detectedCountry = detected;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(questJson))
+                    {
+                        List<QuestItem> parsed = ParseQuestCatalogJson(questJson, regionJson);
+                        if (parsed.Count > 0)
+                        {
+                            DateTime nowUtc = DateTime.UtcNow;
+                            lock (_lock)
+                            {
+                                _quests = parsed;
+                                _lastUpdatedUtc = nowUtc;
+                            }
+                            try
+                            {
+                                QuestCacheEnvelope env = new QuestCacheEnvelope
+                                {
+                                    cached_at = (long)(nowUtc - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds,
+                                    quests_json = questJson,
+                                    regions_json = regionJson ?? ""
+                                };
+                                JavaScriptSerializer ser = new JavaScriptSerializer();
+                                ser.MaxJsonLength = int.MaxValue;
+                                GameDatabase.SafeAtomicWriteText(CacheFilePath, ser.Serialize(env));
+                            }
+                            catch (Exception ex) { Program.LogError("QuestCacheSave", ex); }
+                        }
+                    }
+                }
+                catch (Exception ex) { Program.LogError("QuestRefresh", ex); }
+                finally
+                {
+                    lock (_lock) _isUpdating = false;
+                    NotifyQuestsUpdated();
+                }
+            });
+        }
+
+        public void SetQuestsForTesting(List<QuestItem> quests, string detectedCountry)
+        {
+            lock (_lock)
+            {
+                _quests = quests != null ? new List<QuestItem>(quests) : new List<QuestItem>();
+                if (detectedCountry != null) _detectedCountry = NormalizeCountryCode(detectedCountry);
+                _lastUpdatedUtc = DateTime.UtcNow;
+            }
+            NotifyQuestsUpdated();
+        }
+
+        public void EnsureStateLoaded()
+        {
+            lock (_lock)
+            {
+                if (_stateLoaded) return;
+                _stateLoaded = true;
+            }
+            LoadUserState();
+        }
+
+        public void LoadUserState()
+        {
+            try
+            {
+                if (!File.Exists(StateFilePath)) return;
+                string json = File.ReadAllText(StateFilePath);
+                if (string.IsNullOrWhiteSpace(json)) return;
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                QuestUserState state = ser.Deserialize<QuestUserState>(json);
+                if (state == null) return;
+                lock (_lock)
+                {
+                    _completedIds.Clear();
+                    if (state.completed_ids != null)
+                    {
+                        for (int i = 0; i < state.completed_ids.Count; i++)
+                        {
+                            string id = state.completed_ids[i];
+                            if (!string.IsNullOrWhiteSpace(id)) _completedIds.Add(id.Trim());
+                        }
+                    }
+                    _progressSeconds.Clear();
+                    if (state.progress_seconds != null)
+                    {
+                        foreach (KeyValuePair<string, int> kv in state.progress_seconds)
+                        {
+                            if (!string.IsNullOrWhiteSpace(kv.Key) && kv.Value > 0)
+                                _progressSeconds[kv.Key.Trim()] = kv.Value;
+                        }
+                    }
+                    _regionOverride = NormalizeCountryCode(state.region_override);
+                    _filterRegionOnly = state.filter_region_only;
+                    _hideCompleted = state.hide_completed;
+                    _stateLoaded = true;
+                }
+            }
+            catch (Exception ex) { Program.LogError("LoadQuestState", ex); }
+        }
+
+        public bool SaveUserState()
+        {
+            try
+            {
+                QuestUserState state;
+                lock (_lock)
+                {
+                    state = new QuestUserState
+                    {
+                        completed_ids = new List<string>(_completedIds),
+                        progress_seconds = new Dictionary<string, int>(_progressSeconds, StringComparer.Ordinal),
+                        region_override = _regionOverride ?? "",
+                        filter_region_only = _filterRegionOnly,
+                        hide_completed = _hideCompleted
+                    };
+                }
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                GameDatabase.SafeAtomicWriteText(StateFilePath, ser.Serialize(state));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Program.LogError("SaveQuestState", ex);
+                return false;
+            }
+        }
+
+        public bool IsCompleted(string questId)
+        {
+            if (string.IsNullOrEmpty(questId)) return false;
+            EnsureStateLoaded();
+            lock (_lock) return _completedIds.Contains(questId);
+        }
+
+        public HashSet<string> GetCompletedIdsSnapshot()
+        {
+            EnsureStateLoaded();
+            lock (_lock) return new HashSet<string>(_completedIds, StringComparer.Ordinal);
+        }
+
+        public int GetQuestProgressSeconds(string questId)
+        {
+            if (string.IsNullOrEmpty(questId)) return 0;
+            EnsureStateLoaded();
+            lock (_lock)
+            {
+                int val;
+                return _progressSeconds.TryGetValue(questId, out val) ? val : 0;
+            }
+        }
+
+        public bool IsQuestSimulating(string questId)
+        {
+            if (string.IsNullOrEmpty(questId)) return false;
+            lock (_lock) return _simulatingQuestIds.Contains(questId);
+        }
+
+        public Dictionary<string, int> GetProgressSnapshot()
+        {
+            EnsureStateLoaded();
+            lock (_lock) return new Dictionary<string, int>(_progressSeconds, StringComparer.Ordinal);
+        }
+
+        public HashSet<string> GetSimulatingQuestIdsSnapshot()
+        {
+            lock (_lock) return new HashSet<string>(_simulatingQuestIds, StringComparer.Ordinal);
+        }
+
+        public bool ToggleCompleted(string questId)
+        {
+            if (string.IsNullOrEmpty(questId)) return false;
+            EnsureStateLoaded();
+            bool nowDone;
+            lock (_lock)
+            {
+                if (_completedIds.Contains(questId))
+                {
+                    _completedIds.Remove(questId);
+                    _progressSeconds.Remove(questId);
+                    nowDone = false;
+                }
+                else
+                {
+                    _completedIds.Add(questId);
+                    nowDone = true;
+                }
+            }
+            SaveUserState();
+            NotifyStateChanged();
+            return nowDone;
+        }
+
+        public static bool DoesQuestMatchGame(QuestItem quest, GameItem game)
+        {
+            if (quest == null || game == null || !quest.HasDesktopTask) return false;
+            string qAppId = quest.DesktopApplicationId;
+            if (!string.IsNullOrEmpty(qAppId) && !string.IsNullOrEmpty(game.id) &&
+                string.Equals(qAppId, game.id, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            string gameNorm = GameDatabase.NormalizeString(game.name);
+            if (string.IsNullOrEmpty(gameNorm)) return false;
+            string qAppNorm = GameDatabase.NormalizeString(quest.application_name);
+            string qTitleNorm = GameDatabase.NormalizeString(quest.game_title);
+            return (!string.IsNullOrEmpty(qAppNorm) && qAppNorm == gameNorm) ||
+                   (!string.IsNullOrEmpty(qTitleNorm) && qTitleNorm == gameNorm);
+        }
+
+        public int GetActiveDesktopQuestTargetSeconds(GameItem game, DateTimeOffset nowUtc)
+        {
+            if (game == null) return 0;
+            EnsureStateLoaded();
+            int maxTarget = 0;
+            lock (_lock)
+            {
+                for (int i = 0; i < _quests.Count; i++)
+                {
+                    QuestItem q = _quests[i];
+                    if (q == null || string.IsNullOrEmpty(q.id)) continue;
+                    if (!q.IsActive(nowUtc) || _completedIds.Contains(q.id)) continue;
+                    if (!DoesQuestMatchGame(q, game)) continue;
+                    int target = q.DesktopTaskTargetSeconds;
+                    if (target > maxTarget) maxTarget = target;
+                }
+            }
+            return maxTarget;
+        }
+
+        public List<string> UpdateActiveSimulationProgress(IList<GameItem> activeGames, int deltaSeconds, DateTimeOffset nowUtc)
+        {
+            EnsureStateLoaded();
+            List<string> newlyCompleted = new List<string>();
+            lock (_lock)
+            {
+                _simulatingQuestIds.Clear();
+                if (activeGames != null && activeGames.Count > 0)
+                {
+                    for (int i = 0; i < _quests.Count; i++)
+                    {
+                        QuestItem q = _quests[i];
+                        if (q == null || string.IsNullOrEmpty(q.id) || !q.IsActive(nowUtc) || !q.HasDesktopTask) continue;
+
+                        for (int g = 0; g < activeGames.Count; g++)
+                        {
+                            if (DoesQuestMatchGame(q, activeGames[g]))
+                            {
+                                _simulatingQuestIds.Add(q.id);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            NotifyProgressUpdated();
+            return newlyCompleted;
+        }
+
+        public void ClearActiveSimulation()
+        {
+            lock (_lock)
+            {
+                _simulatingQuestIds.Clear();
+            }
+            NotifyProgressUpdated();
+        }
+
+        public void SetFilterPreferences(bool filterRegionOnly, bool hideCompleted, string regionOverride)
+        {
+            EnsureStateLoaded();
+            lock (_lock)
+            {
+                _filterRegionOnly = filterRegionOnly;
+                _hideCompleted = hideCompleted;
+                if (regionOverride != null) _regionOverride = NormalizeCountryCode(regionOverride);
+            }
+            SaveUserState();
+            NotifyStateChanged();
+        }
+
+        public GameItem ResolveGameForQuest(QuestItem quest)
+        {
+            if (quest == null) return null;
+            string appId = quest.DesktopApplicationId;
+            if (!string.IsNullOrEmpty(appId))
+            {
+                GameItem byId = GameDatabase.Instance.FindById(appId);
+                if (byId != null) return byId;
+            }
+
+            if (!string.IsNullOrWhiteSpace(quest.game_title))
+            {
+                GameItem byTitle = GameDatabase.Instance.FindExactGame(quest.game_title);
+                if (byTitle != null) return byTitle;
+            }
+
+            if (!string.IsNullOrWhiteSpace(quest.application_name))
+            {
+                GameItem byAppName = GameDatabase.Instance.FindExactGame(quest.application_name);
+                if (byAppName != null) return byAppName;
+            }
+
+            string fallbackName = !string.IsNullOrWhiteSpace(quest.application_name)
+                ? quest.application_name
+                : quest.DisplayGameName;
+            return new GameItem
+            {
+                id = appId ?? "",
+                name = fallbackName,
+                exe = GameDatabase.InferExecutableFromName(fallbackName),
+                icon = ""
+            };
+        }
+
+        private void NotifyQuestsUpdated()
+        {
+            Action handler = OnQuestsUpdated;
+            if (handler != null)
+            {
+                try { handler(); }
+                catch (Exception ex) { Program.LogError("QuestsUpdated", ex); }
+            }
+        }
+
+        private void NotifyStateChanged()
+        {
+            Action handler = OnStateChanged;
+            if (handler != null)
+            {
+                try { handler(); }
+                catch (Exception ex) { Program.LogError("QuestStateChanged", ex); }
+            }
+        }
+
+        private void NotifyProgressUpdated()
+        {
+            Action handler = OnProgressUpdated;
+            if (handler != null)
+            {
+                try { handler(); }
+                catch (Exception ex) { Program.LogError("QuestProgressUpdated", ex); }
+            }
+        }
+
+        public static string NormalizeCountryCode(string code)
+        {
+            if (string.IsNullOrWhiteSpace(code)) return "";
+            string c = code.Trim().ToUpperInvariant();
+            if (c == "GB") return "UK";
+            return c;
+        }
+
+        public static string ParseCloudflareTraceCountry(string traceText)
+        {
+            if (string.IsNullOrWhiteSpace(traceText)) return "";
+            string[] lines = traceText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i].Trim();
+                if (line.StartsWith("loc=", StringComparison.OrdinalIgnoreCase))
+                {
+                    return NormalizeCountryCode(line.Substring(4));
+                }
+            }
+            return "";
+        }
+
+        public static List<QuestItem> ParseQuestCatalogJson(string questJson, string regionJson)
+        {
+            List<QuestItem> result = new List<QuestItem>();
+            if (string.IsNullOrWhiteSpace(questJson)) return result;
+
+            Dictionary<string, QuestRegionInfo> regionMap = ParseRegionMapJson(regionJson);
+
+            JavaScriptSerializer ser = new JavaScriptSerializer();
+            ser.MaxJsonLength = int.MaxValue;
+            object rootObj = ser.DeserializeObject(questJson);
+            System.Collections.IEnumerable rawQuests = rootObj as System.Collections.IEnumerable;
+            if (rawQuests == null || rootObj is string || rootObj is Dictionary<string, object>) return result;
+
+            foreach (object obj in rawQuests)
+            {
+                Dictionary<string, object> dict = obj as Dictionary<string, object>;
+                if (dict == null) continue;
+
+                string id = IconCache.DictString(dict, "id");
+                if (string.IsNullOrEmpty(id)) continue;
+
+                Dictionary<string, object> app = IconCache.DictObject(dict, "application");
+                Dictionary<string, object> assets = IconCache.DictObject(dict, "assets");
+                Dictionary<string, object> messages = IconCache.DictObject(dict, "messages");
+                Dictionary<string, object> taskConfig = IconCache.DictObject(dict, "task_config_v2")
+                    ?? IconCache.DictObject(dict, "task_config");
+                Dictionary<string, object> rewardsConfig = IconCache.DictObject(dict, "rewards_config");
+
+                QuestItem quest = new QuestItem
+                {
+                    id = id,
+                    quest_name = IconCache.DictString(messages, "quest_name") ?? "",
+                    game_title = IconCache.DictString(messages, "game_title") ?? "",
+                    game_publisher = IconCache.DictString(messages, "game_publisher") ?? "",
+                    application_id = IconCache.DictString(app, "id") ?? "",
+                    application_name = IconCache.DictString(app, "name") ?? "",
+                    application_link = IconCache.DictString(app, "link") ?? "",
+                    starts_at = IconCache.DictString(dict, "starts_at") ?? "",
+                    expires_at = IconCache.DictString(dict, "expires_at") ?? "",
+                    hero_asset = IconCache.DictString(assets, "hero") ?? IconCache.DictString(assets, "quest_bar_hero") ?? "",
+                    tile_asset = IconCache.DictString(assets, "game_tile_dark") ?? IconCache.DictString(assets, "game_tile_light") ?? IconCache.DictString(assets, "game_tile") ?? "",
+                    tasks = ParseTasks(taskConfig, IconCache.DictString(app, "id")),
+                    rewards = ParseRewards(rewardsConfig),
+                    region = regionMap.ContainsKey(id) ? regionMap[id] : null
+                };
+                result.Add(quest);
+            }
+            return result;
+        }
+
+        private static Dictionary<string, QuestRegionInfo> ParseRegionMapJson(string regionJson)
+        {
+            Dictionary<string, QuestRegionInfo> map = new Dictionary<string, QuestRegionInfo>(StringComparer.Ordinal);
+            if (string.IsNullOrWhiteSpace(regionJson)) return map;
+            try
+            {
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                ser.MaxJsonLength = int.MaxValue;
+                Dictionary<string, object> root = ser.Deserialize<Dictionary<string, object>>(regionJson);
+                object[] arr = IconCache.DictArray(root, "quests");
+                if (arr == null) return map;
+
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    Dictionary<string, object> entry = arr[i] as Dictionary<string, object>;
+                    if (entry == null) continue;
+                    string id = IconCache.DictString(entry, "id");
+                    if (string.IsNullOrEmpty(id)) continue;
+
+                    QuestRegionInfo info = new QuestRegionInfo
+                    {
+                        show_age_gate = DictBool(entry, "show_age_gate"),
+                        is_global = DictBool(entry, "is_global"),
+                        include = new List<string>(),
+                        exclude = new List<string>()
+                    };
+
+                    if (entry.ContainsKey("regions") && entry["regions"] != null)
+                    {
+                        Dictionary<string, object> regionObj = entry["regions"] as Dictionary<string, object>;
+                        if (regionObj != null)
+                        {
+                            info.include = ExtractCountryList(regionObj.ContainsKey("include") ? regionObj["include"] : null);
+                            info.exclude = ExtractCountryList(regionObj.ContainsKey("exclude") ? regionObj["exclude"] : null);
+                        }
+                        else
+                        {
+                            info.include = ExtractCountryList(entry["regions"]);
+                        }
+                    }
+                    map[id] = info;
+                }
+            }
+            catch (Exception ex) { Program.LogError("ParseRegionMap", ex); }
+            return map;
+        }
+
+        private static List<string> ExtractCountryList(object raw)
+        {
+            List<string> list = new List<string>();
+            System.Collections.IEnumerable seq = raw as System.Collections.IEnumerable;
+            if (seq == null || raw is string) return list;
+            foreach (object item in seq)
+            {
+                if (item == null) continue;
+                string norm = NormalizeCountryCode(item.ToString());
+                if (!string.IsNullOrEmpty(norm) && !list.Contains(norm)) list.Add(norm);
+            }
+            return list;
+        }
+
+        private static List<QuestTaskInfo> ParseTasks(Dictionary<string, object> taskConfig, string fallbackAppId)
+        {
+            List<QuestTaskInfo> list = new List<QuestTaskInfo>();
+            Dictionary<string, object> tasksDict = IconCache.DictObject(taskConfig, "tasks");
+            if (tasksDict == null) return list;
+
+            foreach (KeyValuePair<string, object> kv in tasksDict)
+            {
+                Dictionary<string, object> tObj = kv.Value as Dictionary<string, object>;
+                if (tObj == null) continue;
+                string type = IconCache.DictString(tObj, "type") ?? kv.Key;
+                int target = DictInt(tObj, "target");
+                string appId = fallbackAppId ?? "";
+                object[] apps = IconCache.DictArray(tObj, "applications");
+                if (apps != null && apps.Length > 0)
+                {
+                    Dictionary<string, object> firstApp = apps[0] as Dictionary<string, object>;
+                    string id = IconCache.DictString(firstApp, "id");
+                    if (!string.IsNullOrEmpty(id)) appId = id;
+                }
+                list.Add(new QuestTaskInfo
+                {
+                    type = type,
+                    target = target,
+                    application_id = appId
+                });
+            }
+            return list;
+        }
+
+        private static List<QuestRewardInfo> ParseRewards(Dictionary<string, object> rewardsConfig)
+        {
+            List<QuestRewardInfo> list = new List<QuestRewardInfo>();
+            object[] rewardsArr = IconCache.DictArray(rewardsConfig, "rewards");
+            if (rewardsArr == null) return list;
+
+            for (int i = 0; i < rewardsArr.Length; i++)
+            {
+                Dictionary<string, object> rObj = rewardsArr[i] as Dictionary<string, object>;
+                if (rObj == null) continue;
+                Dictionary<string, object> msg = IconCache.DictObject(rObj, "messages");
+                Dictionary<string, object> instrMap = IconCache.DictObject(msg, "redemption_instructions_by_platform");
+                string instr = IconCache.DictString(instrMap, "0") ?? "";
+                if (string.IsNullOrEmpty(instr) && instrMap != null)
+                {
+                    foreach (KeyValuePair<string, object> kv in instrMap)
+                    {
+                        if (kv.Value != null)
+                        {
+                            string candidate = kv.Value.ToString().Trim();
+                            if (!string.IsNullOrEmpty(candidate) && !string.Equals(candidate, "PLACEHOLDER", StringComparison.OrdinalIgnoreCase))
+                            {
+                                instr = candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (string.Equals(instr, "PLACEHOLDER", StringComparison.OrdinalIgnoreCase)) instr = "";
+                if (instr.Length >= 2 && instr[0] == '"' && instr[instr.Length - 1] == '"')
+                    instr = instr.Substring(1, instr.Length - 2).Trim();
+
+                list.Add(new QuestRewardInfo
+                {
+                    type = DictInt(rObj, "type"),
+                    name = IconCache.DictString(msg, "name") ?? "",
+                    orb_quantity = DictInt(rObj, "orb_quantity"),
+                    asset = IconCache.DictString(rObj, "asset") ?? "",
+                    redemption_instructions = instr
+                });
+            }
+            return list;
+        }
+
+        private static bool DictBool(Dictionary<string, object> dict, string key)
+        {
+            if (dict == null || !dict.ContainsKey(key) || dict[key] == null) return false;
+            if (dict[key] is bool) return (bool)dict[key];
+            bool parsed;
+            return bool.TryParse(dict[key].ToString(), out parsed) && parsed;
+        }
+
+        private static int DictInt(Dictionary<string, object> dict, string key)
+        {
+            if (dict == null || !dict.ContainsKey(key) || dict[key] == null) return 0;
+            object v = dict[key];
+            if (v is int) return (int)v;
+            if (v is long) return (int)(long)v;
+            if (v is double) return (int)(double)v;
+            if (v is decimal) return (int)(decimal)v;
+            int parsed;
+            return int.TryParse(v.ToString(), out parsed) ? parsed : 0;
+        }
+
+        public static List<QuestItem> FilterQuests(
+            IList<QuestItem> source,
+            string category,
+            string query,
+            bool regionOnly,
+            string countryCode,
+            bool hideCompleted,
+            HashSet<string> completedIds,
+            string sortMode,
+            DateTimeOffset nowUtc)
+        {
+            HashSet<string> unused;
+            return FilterQuests(source, category, query, regionOnly, countryCode, hideCompleted, completedIds, sortMode, nowUtc, out unused);
+        }
+
+        public static List<QuestItem> FilterQuests(
+            IList<QuestItem> source,
+            string category,
+            string query,
+            bool regionOnly,
+            string countryCode,
+            bool hideCompleted,
+            HashSet<string> completedIds,
+            string sortMode,
+            DateTimeOffset nowUtc,
+            out HashSet<string> alsoGlobalIds)
+        {
+            alsoGlobalIds = new HashSet<string>(StringComparer.Ordinal);
+            List<QuestItem> filtered = new List<QuestItem>();
+            if (source == null) return filtered;
+
+            string cat = string.IsNullOrEmpty(category) ? "active" : category.ToLowerInvariant();
+            string q = string.IsNullOrWhiteSpace(query) ? "" : query.Trim().ToLowerInvariant();
+            string cc = NormalizeCountryCode(countryCode);
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                QuestItem item = source[i];
+                if (item == null) continue;
+
+                bool isDone = completedIds != null && !string.IsNullOrEmpty(item.id) && completedIds.Contains(item.id);
+                if (hideCompleted && cat != "done" && isDone) continue;
+                if (regionOnly && !string.IsNullOrEmpty(cc) && !item.IsEligibleInRegion(cc)) continue;
+
+                bool matchesCategory;
+                if (cat == "active") matchesCategory = item.IsActive(nowUtc);
+                else if (cat == "desktop") matchesCategory = item.IsActive(nowUtc) && item.HasDesktopTask;
+                else if (cat == "ending") matchesCategory = item.IsEndingSoon(nowUtc);
+                else if (cat == "orbs") matchesCategory = item.IsActive(nowUtc) && item.HasOrbsReward;
+                else if (cat == "collectibles") matchesCategory = item.IsActive(nowUtc) && item.HasCollectibleReward;
+                else if (cat == "expired") matchesCategory = item.IsExpired(nowUtc);
+                else if (cat == "done") matchesCategory = isDone;
+                else matchesCategory = true;
+
+                if (!matchesCategory) continue;
+
+                if (q.Length > 0 && !MatchesQuery(item, q)) continue;
+                filtered.Add(item);
+            }
+
+            string sort = string.IsNullOrEmpty(sortMode) ? "ending_soon" : sortMode.ToLowerInvariant();
+            filtered.Sort((a, b) => CompareQuests(a, b, sort));
+
+            if (regionOnly && !string.IsNullOrEmpty(cc) && filtered.Count > 1)
+            {
+                filtered = DeduplicateRegionalVariants(filtered, cc, alsoGlobalIds);
+            }
+            return filtered;
+        }
+
+        private static bool IsCountrySpecificMatch(QuestItem item, string normalizedCountry)
+        {
+            return item != null && item.region != null && !item.region.is_global &&
+                   item.region.include != null && item.region.include.Contains(normalizedCountry);
+        }
+
+        private static bool IsGlobalOrUntagged(QuestItem item)
+        {
+            return item != null && (item.region == null || item.region.is_global);
+        }
+
+        private static List<QuestItem> DeduplicateRegionalVariants(List<QuestItem> sorted, string cc, HashSet<string> alsoGlobalIds)
+        {
+            Dictionary<string, List<int>> groups = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            for (int i = 0; i < sorted.Count; i++)
+            {
+                QuestItem item = sorted[i];
+                string key = GameDatabase.NormalizeString(item.DisplayTitle) + "|" + (item.application_id ?? "") + "|" + (item.expires_at ?? "");
+                List<int> list;
+                if (!groups.TryGetValue(key, out list))
+                {
+                    list = new List<int>();
+                    groups[key] = list;
+                }
+                list.Add(i);
+            }
+
+            HashSet<int> keepIndices = new HashSet<int>();
+            foreach (KeyValuePair<string, List<int>> kv in groups)
+            {
+                List<int> idxs = kv.Value;
+                if (idxs.Count == 1)
+                {
+                    keepIndices.Add(idxs[0]);
+                    continue;
+                }
+                int winnerIdx = -1;
+                bool hasGlobal = false;
+                for (int i = 0; i < idxs.Count; i++)
+                {
+                    QuestItem cand = sorted[idxs[i]];
+                    if (winnerIdx < 0 && IsCountrySpecificMatch(cand, cc)) winnerIdx = idxs[i];
+                    if (IsGlobalOrUntagged(cand)) hasGlobal = true;
+                }
+                bool pickedCountry = winnerIdx >= 0;
+                if (!pickedCountry) winnerIdx = idxs[0];
+                keepIndices.Add(winnerIdx);
+                if (pickedCountry && hasGlobal && !string.IsNullOrEmpty(sorted[winnerIdx].id))
+                {
+                    alsoGlobalIds.Add(sorted[winnerIdx].id);
+                }
+            }
+
+            List<QuestItem> deduped = new List<QuestItem>(keepIndices.Count);
+            for (int i = 0; i < sorted.Count; i++)
+            {
+                if (keepIndices.Contains(i)) deduped.Add(sorted[i]);
+            }
+            return deduped;
+        }
+
+        private static bool MatchesQuery(QuestItem item, string lowerQuery)
+        {
+            if ((item.quest_name ?? "").ToLowerInvariant().Contains(lowerQuery)) return true;
+            if ((item.game_title ?? "").ToLowerInvariant().Contains(lowerQuery)) return true;
+            if ((item.application_name ?? "").ToLowerInvariant().Contains(lowerQuery)) return true;
+            if ((item.game_publisher ?? "").ToLowerInvariant().Contains(lowerQuery)) return true;
+            if (item.rewards != null)
+            {
+                for (int i = 0; i < item.rewards.Count; i++)
+                {
+                    QuestRewardInfo r = item.rewards[i];
+                    if (r == null) continue;
+                    if ((r.name ?? "").ToLowerInvariant().Contains(lowerQuery)) return true;
+                    if (r.GetTypeLabel().ToLowerInvariant().Contains(lowerQuery)) return true;
+                }
+            }
+            if (item.tasks != null)
+            {
+                for (int i = 0; i < item.tasks.Count; i++)
+                {
+                    QuestTaskInfo t = item.tasks[i];
+                    if (t == null) continue;
+                    if (t.GetDisplayLabel().ToLowerInvariant().Contains(lowerQuery)) return true;
+                }
+            }
+            return false;
+        }
+
+        private static int CompareQuests(QuestItem a, QuestItem b, string sortMode)
+        {
+            if (sortMode == "name")
+            {
+                return string.Compare(a.DisplayTitle, b.DisplayTitle, StringComparison.OrdinalIgnoreCase);
+            }
+            if (sortMode == "newest")
+            {
+                int cmp = b.StartsAtUtc.CompareTo(a.StartsAtUtc);
+                if (cmp != 0) return cmp;
+                return string.Compare(a.DisplayTitle, b.DisplayTitle, StringComparison.OrdinalIgnoreCase);
+            }
+            // Default: ending_soon (earliest expiration first, unknown last)
+            DateTimeOffset ea = a.ExpiresAtUtc == DateTimeOffset.MinValue ? DateTimeOffset.MaxValue : a.ExpiresAtUtc;
+            DateTimeOffset eb = b.ExpiresAtUtc == DateTimeOffset.MinValue ? DateTimeOffset.MaxValue : b.ExpiresAtUtc;
+            int expCmp = ea.CompareTo(eb);
+            if (expCmp != 0) return expCmp;
+            return string.Compare(a.DisplayTitle, b.DisplayTitle, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    #endregion
+
     #region Icon Cache
 
     public class IconCache
@@ -1959,7 +3284,7 @@ namespace DiscordQuestLauncher
 
         private const string IconUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 
-        private static byte[] DownloadBytes(string url, int minBytes)
+        public static byte[] DownloadBytes(string url, int minBytes)
         {
             try
             {
@@ -2023,7 +3348,7 @@ namespace DiscordQuestLauncher
             return null;
         }
 
-        private static string DictString(Dictionary<string, object> dict, string key)
+        public static string DictString(Dictionary<string, object> dict, string key)
         {
             if (dict == null || !dict.ContainsKey(key) || dict[key] == null) return null;
             string v = dict[key].ToString().Trim();
@@ -2043,13 +3368,13 @@ namespace DiscordQuestLauncher
             catch { return null; }
         }
 
-        private static Dictionary<string, object> DictObject(Dictionary<string, object> dict, string key)
+        public static Dictionary<string, object> DictObject(Dictionary<string, object> dict, string key)
         {
             if (dict == null || !dict.ContainsKey(key)) return null;
             return dict[key] as Dictionary<string, object>;
         }
 
-        private static object[] DictArray(Dictionary<string, object> dict, string key)
+        public static object[] DictArray(Dictionary<string, object> dict, string key)
         {
             if (dict == null || !dict.ContainsKey(key)) return null;
             // Untyped JSON arrays deserialize as ArrayList on .NET Framework.
@@ -2275,7 +3600,132 @@ namespace DiscordQuestLauncher
                     }
                 }
             }
-            return bmp;
+                    return bmp;
+        }
+    }
+
+    #endregion
+
+    #region Quest Asset Cache
+
+    /// <summary>
+    /// Downloads and caches Discord Quest thumbnails with bounded memory usage.
+    /// </summary>
+    public class QuestAssetCache
+    {
+        private static QuestAssetCache _instance;
+        public static QuestAssetCache Instance
+        {
+            get
+            {
+                if (_instance == null) _instance = new QuestAssetCache();
+                return _instance;
+            }
+        }
+
+        private const int MaxMemoryEntries = 120;
+        private readonly object _lock = new object();
+        private readonly Dictionary<string, Image> _memoryCache = new Dictionary<string, Image>();
+        private readonly LinkedList<string> _lruOrder = new LinkedList<string>();
+        private readonly HashSet<string> _inFlight = new HashSet<string>();
+        private readonly Dictionary<string, DateTime> _retryAfter = new Dictionary<string, DateTime>();
+
+        public string AssetDirectory
+        {
+            get
+            {
+                string dir = Path.Combine(GameDatabase.Instance.CacheDirectory, "quest_assets");
+                if (!Directory.Exists(dir))
+                {
+                    try { Directory.CreateDirectory(dir); } catch { }
+                }
+                return dir;
+            }
+        }
+
+        public Image GetThumbnail(string assetPath, int size, int radius, Action onLoaded)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath) || string.Equals(assetPath, "PLACEHOLDER", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            string key = assetPath + "_" + size + "_" + radius;
+            lock (_lock)
+            {
+                Image cached;
+                if (_memoryCache.TryGetValue(key, out cached)) return cached;
+                DateTime retry;
+                if (_retryAfter.TryGetValue(key, out retry) && DateTime.UtcNow < retry) return null;
+                if (!_inFlight.Add(key)) return null;
+            }
+
+            ThreadPool.QueueUserWorkItem(_ => LoadThumbnail(assetPath, size, radius, key, onLoaded));
+            return null;
+        }
+
+        private void LoadThumbnail(string assetPath, int size, int radius, string key, Action onLoaded)
+        {
+            bool loaded = false;
+            try
+            {
+                string safeName = Regex.Replace(assetPath, @"[^a-zA-Z0-9._-]", "_");
+                string diskPath = Path.Combine(AssetDirectory, safeName);
+                byte[] data = null;
+                if (File.Exists(diskPath))
+                {
+                    try { data = File.ReadAllBytes(diskPath); } catch { data = null; }
+                }
+                if (data == null || data.Length == 0)
+                {
+                    string cleanPath = assetPath.TrimStart('/');
+                    string url = "https://cdn.discordapp.com/" + cleanPath;
+                    data = IconCache.DownloadBytes(url, 64);
+                    if (data != null && data.Length > 0)
+                    {
+                        try { File.WriteAllBytes(diskPath, data); } catch { }
+                    }
+                }
+                if (data != null && data.Length > 0)
+                {
+                    using (MemoryStream ms = new MemoryStream(data))
+                    using (Image src = Image.FromStream(ms))
+                    {
+                        Bitmap thumb = IconCache.CreateRoundedThumbnail(src, size, radius);
+                        lock (_lock)
+                        {
+                            if (!_memoryCache.ContainsKey(key))
+                            {
+                                _memoryCache[key] = thumb;
+                                _lruOrder.AddLast(key);
+                                while (_lruOrder.Count > MaxMemoryEntries)
+                                {
+                                    string oldest = _lruOrder.First.Value;
+                                    _lruOrder.RemoveFirst();
+                                    _memoryCache.Remove(oldest);
+                                }
+                            }
+                            else
+                            {
+                                thumb.Dispose();
+                            }
+                        }
+                        loaded = true;
+                    }
+                }
+            }
+            catch { }
+            finally
+            {
+                lock (_lock)
+                {
+                    _inFlight.Remove(key);
+                    if (!loaded && !_memoryCache.ContainsKey(key))
+                        _retryAfter[key] = DateTime.UtcNow.AddMinutes(5);
+                }
+                if (loaded && onLoaded != null)
+                {
+                    try { onLoaded(); } catch { }
+                }
+            }
         }
     }
 
@@ -2349,7 +3799,7 @@ namespace DiscordQuestLauncher
             _isRunning = running;
             int targetWidth = running ? 196 : 148;
             this.Size = new Size(targetWidth, 36);
-            int parentWidth = (this.Parent != null) ? this.Parent.ClientSize.Width : 420;
+            int parentWidth = (this.Parent is MainForm) ? 420 : ((this.Parent != null) ? this.Parent.ClientSize.Width : 420);
             this.Location = new Point((parentWidth - targetWidth) / 2, 338);
             Invalidate();
         }
@@ -4009,6 +5459,2235 @@ namespace DiscordQuestLauncher
         }
     }
 
+    #region Quests Explorer UI
+
+    /// <summary>
+    /// Dark themed menu renderer used for region and sort dropdown menus in QuestsForm.
+    /// </summary>
+    public class DarkMenuRenderer : ToolStripProfessionalRenderer
+    {
+        public DarkMenuRenderer() : base(new DarkColorTable()) { }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Selected ? Color.White : Theme.TextPrimary;
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+        {
+            using (SolidBrush b = new SolidBrush(Theme.BgSurface))
+            {
+                e.Graphics.FillRectangle(b, e.AffectedBounds);
+            }
+        }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            int y = e.Item.ContentRectangle.Height / 2;
+            using (Pen p = new Pen(Theme.BorderSubtle, 1f))
+            {
+                e.Graphics.DrawLine(p, 8, y, e.Item.Width - 8, y);
+            }
+        }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            Rectangle rect = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
+            using (SolidBrush b = new SolidBrush(e.Item.Selected ? Theme.BgCardHover : Theme.BgSurface))
+            {
+                e.Graphics.FillRectangle(b, rect);
+            }
+        }
+
+        private class DarkColorTable : ProfessionalColorTable
+        {
+            public override Color ToolStripDropDownBackground { get { return Theme.BgSurface; } }
+            public override Color MenuBorder { get { return Theme.BorderHover; } }
+            public override Color MenuItemBorder { get { return Theme.BorderHover; } }
+            public override Color MenuItemSelected { get { return Theme.BgCardHover; } }
+            public override Color ImageMarginGradientBegin { get { return Theme.BgSurface; } }
+            public override Color ImageMarginGradientMiddle { get { return Theme.BgSurface; } }
+            public override Color ImageMarginGradientEnd { get { return Theme.BgSurface; } }
+            public override Color SeparatorDark { get { return Theme.BorderSubtle; } }
+            public override Color SeparatorLight { get { return Theme.BorderSubtle; } }
+        }
+    }
+
+    /// <summary>
+    /// Crisp cached 18x12 GDI+ country flag and globe icons for region selectors and quest badges.
+    /// </summary>
+    public static class FlagIcons
+    {
+        private static readonly object _lock = new object();
+        private static readonly Dictionary<string, Bitmap> _cache = new Dictionary<string, Bitmap>(StringComparer.Ordinal);
+        private static Bitmap _globe;
+
+        public static string GetCountryDisplayName(string code)
+        {
+            string c = QuestDatabase.NormalizeCountryCode(code);
+            if (c == "US") return "United States";
+            if (c == "UK") return "United Kingdom";
+            if (c == "DE") return "Germany";
+            if (c == "CA") return "Canada";
+            if (c == "TR") return "Turkey";
+            if (c == "FR") return "France";
+            if (c == "JP") return "Japan";
+            if (c == "BR") return "Brazil";
+            if (c == "AU") return "Australia";
+            if (c == "ES") return "Spain";
+            if (c == "PL") return "Poland";
+            if (c == "KR") return "South Korea";
+            return c;
+        }
+
+        public static Bitmap GetGlobeIcon()
+        {
+            lock (_lock)
+            {
+                if (_globe != null) return _globe;
+                Bitmap bmp = new Bitmap(18, 12, PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    using (GraphicsPath clip = Program.GetRoundedPath(new Rectangle(0, 0, 18, 12), 2))
+                    {
+                        g.SetClip(clip);
+                        using (SolidBrush bg = new SolidBrush(Color.FromArgb(26, 30, 48)))
+                            g.FillRectangle(bg, 0, 0, 18, 12);
+                        using (Pen p = new Pen(Color.FromArgb(130, 165, 255), 1.1f))
+                        {
+                            g.DrawEllipse(p, 4, 1, 9, 9);
+                            g.DrawEllipse(p, 6, 1, 5, 9);
+                            g.DrawLine(p, 4, 6, 13, 6);
+                        }
+                        g.ResetClip();
+                    }
+                    using (GraphicsPath border = Program.GetRoundedPath(new Rectangle(0, 0, 17, 11), 2))
+                    using (Pen bp = new Pen(Color.FromArgb(65, 255, 255, 255), 1f))
+                        g.DrawPath(bp, border);
+                }
+                _globe = bmp;
+                return _globe;
+            }
+        }
+
+        public static Bitmap GetFlag(string countryCode)
+        {
+            string c = QuestDatabase.NormalizeCountryCode(countryCode);
+            if (string.IsNullOrEmpty(c)) return GetGlobeIcon();
+            lock (_lock)
+            {
+                Bitmap cached;
+                if (_cache.TryGetValue(c, out cached)) return cached;
+                Bitmap bmp = RenderFlag(c);
+                _cache[c] = bmp;
+                return bmp;
+            }
+        }
+
+        private static Bitmap RenderFlag(string c)
+        {
+            const int w = 18;
+            const int h = 12;
+            Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (GraphicsPath clip = Program.GetRoundedPath(new Rectangle(0, 0, w, h), 2))
+                {
+                    g.SetClip(clip);
+                    DrawFlagGraphics(g, c, w, h);
+                    g.ResetClip();
+                }
+                using (GraphicsPath border = Program.GetRoundedPath(new Rectangle(0, 0, w - 1, h - 1), 2))
+                using (Pen bp = new Pen(Color.FromArgb(75, 0, 0, 0), 1f))
+                    g.DrawPath(bp, border);
+            }
+            return bmp;
+        }
+
+        private static void DrawFlagGraphics(Graphics g, string c, int w, int h)
+        {
+            if (c == "US")
+            {
+                Fill(g, Color.White, 0, 0, w, h);
+                using (SolidBrush red = new SolidBrush(Color.FromArgb(178, 34, 52)))
+                {
+                    for (int i = 0; i < 6; i += 2) g.FillRectangle(red, 0, i * 2, w, 2);
+                }
+                Fill(g, Color.FromArgb(60, 59, 110), 0, 0, 8, 7);
+                using (SolidBrush star = new SolidBrush(Color.White))
+                {
+                    g.FillRectangle(star, 2, 2, 1, 1);
+                    g.FillRectangle(star, 5, 2, 1, 1);
+                    g.FillRectangle(star, 3, 4, 1, 1);
+                    g.FillRectangle(star, 6, 4, 1, 1);
+                }
+                return;
+            }
+            if (c == "UK")
+            {
+                Fill(g, Color.FromArgb(1, 33, 105), 0, 0, w, h);
+                using (Pen wDiag = new Pen(Color.White, 2.4f))
+                using (Pen rDiag = new Pen(Color.FromArgb(200, 16, 46), 1.1f))
+                {
+                    g.DrawLine(wDiag, 0, 0, w, h);
+                    g.DrawLine(wDiag, w, 0, 0, h);
+                    g.DrawLine(rDiag, 0, 0, w, h);
+                    g.DrawLine(rDiag, w, 0, 0, h);
+                }
+                Fill(g, Color.White, 7, 0, 4, h);
+                Fill(g, Color.White, 0, 4, w, 4);
+                Fill(g, Color.FromArgb(200, 16, 46), 8, 0, 2, h);
+                Fill(g, Color.FromArgb(200, 16, 46), 0, 5, w, 2);
+                return;
+            }
+            if (c == "DE") { HStripes(g, w, h, Color.FromArgb(20, 20, 24), Color.FromArgb(221, 0, 0), Color.FromArgb(255, 206, 0)); return; }
+            if (c == "FR") { VStripes(g, w, h, Color.FromArgb(0, 85, 164), Color.White, Color.FromArgb(239, 65, 53)); return; }
+            if (c == "IT") { VStripes(g, w, h, Color.FromArgb(0, 146, 70), Color.White, Color.FromArgb(206, 43, 55)); return; }
+            if (c == "BE") { VStripes(g, w, h, Color.FromArgb(20, 20, 24), Color.FromArgb(253, 218, 36), Color.FromArgb(239, 51, 64)); return; }
+            if (c == "IE") { VStripes(g, w, h, Color.FromArgb(22, 155, 98), Color.White, Color.FromArgb(255, 136, 62)); return; }
+            if (c == "MX")
+            {
+                VStripes(g, w, h, Color.FromArgb(0, 104, 71), Color.White, Color.FromArgb(206, 17, 38));
+                Fill(g, Color.FromArgb(140, 98, 57), 8, 5, 2, 2);
+                return;
+            }
+            if (c == "NL") { HStripes(g, w, h, Color.FromArgb(174, 28, 40), Color.White, Color.FromArgb(33, 70, 139)); return; }
+            if (c == "AT") { HStripes(g, w, h, Color.FromArgb(237, 41, 57), Color.White, Color.FromArgb(237, 41, 57)); return; }
+            if (c == "AR")
+            {
+                HStripes(g, w, h, Color.FromArgb(116, 172, 223), Color.White, Color.FromArgb(116, 172, 223));
+                Fill(g, Color.FromArgb(246, 180, 14), 8, 5, 2, 2);
+                return;
+            }
+            if (c == "IN")
+            {
+                HStripes(g, w, h, Color.FromArgb(255, 153, 51), Color.White, Color.FromArgb(19, 136, 8));
+                Fill(g, Color.FromArgb(0, 0, 128), 8, 5, 2, 2);
+                return;
+            }
+            if (c == "PL")
+            {
+                Fill(g, Color.White, 0, 0, w, 6);
+                Fill(g, Color.FromArgb(220, 20, 60), 0, 6, w, 6);
+                return;
+            }
+            if (c == "ID")
+            {
+                Fill(g, Color.FromArgb(206, 17, 38), 0, 0, w, 6);
+                Fill(g, Color.White, 0, 6, w, 6);
+                return;
+            }
+            if (c == "UA")
+            {
+                Fill(g, Color.FromArgb(0, 87, 183), 0, 0, w, 6);
+                Fill(g, Color.FromArgb(255, 215, 0), 0, 6, w, 6);
+                return;
+            }
+            if (c == "ES")
+            {
+                Fill(g, Color.FromArgb(170, 21, 27), 0, 0, w, 3);
+                Fill(g, Color.FromArgb(241, 191, 0), 0, 3, w, 6);
+                Fill(g, Color.FromArgb(170, 21, 27), 0, 9, w, 3);
+                Fill(g, Color.FromArgb(170, 21, 27), 4, 4, 2, 4);
+                return;
+            }
+            if (c == "CA")
+            {
+                Fill(g, Color.FromArgb(255, 0, 0), 0, 0, 5, h);
+                Fill(g, Color.White, 5, 0, 8, h);
+                Fill(g, Color.FromArgb(255, 0, 0), 13, 0, 5, h);
+                using (SolidBrush leaf = new SolidBrush(Color.FromArgb(255, 0, 0)))
+                {
+                    Point[] pts = new Point[] { new Point(9, 2), new Point(12, 6), new Point(9, 10), new Point(6, 6) };
+                    g.FillPolygon(leaf, pts);
+                }
+                return;
+            }
+            if (c == "TR")
+            {
+                Fill(g, Color.FromArgb(227, 10, 23), 0, 0, w, h);
+                using (SolidBrush wb = new SolidBrush(Color.White))
+                using (SolidBrush rb = new SolidBrush(Color.FromArgb(227, 10, 23)))
+                {
+                    g.FillEllipse(wb, 4, 3, 6, 6);
+                    g.FillEllipse(rb, 6, 3.6f, 5, 4.8f);
+                    g.FillEllipse(wb, 10, 4.8f, 2.4f, 2.4f);
+                }
+                return;
+            }
+            if (c == "JP")
+            {
+                Fill(g, Color.White, 0, 0, w, h);
+                using (SolidBrush red = new SolidBrush(Color.FromArgb(188, 0, 45)))
+                    g.FillEllipse(red, 6, 3, 6, 6);
+                return;
+            }
+            if (c == "BR")
+            {
+                Fill(g, Color.FromArgb(0, 156, 59), 0, 0, w, h);
+                using (SolidBrush y = new SolidBrush(Color.FromArgb(255, 223, 0)))
+                {
+                    Point[] diamond = new Point[] { new Point(9, 2), new Point(16, 6), new Point(9, 10), new Point(2, 6) };
+                    g.FillPolygon(y, diamond);
+                }
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(0, 39, 118)))
+                    g.FillEllipse(b, 7, 4, 4, 4);
+                return;
+            }
+            if (c == "AU" || c == "NZ")
+            {
+                Fill(g, Color.FromArgb(0, 0, 139), 0, 0, w, h);
+                Fill(g, Color.White, 3, 0, 2, 6);
+                Fill(g, Color.White, 0, 2, 8, 2);
+                Fill(g, Color.FromArgb(220, 20, 40), 3, 0, 1, 6);
+                Fill(g, Color.FromArgb(220, 20, 40), 0, 3, 8, 1);
+                Color starCol = c == "NZ" ? Color.FromArgb(220, 30, 50) : Color.White;
+                Fill(g, starCol, 13, 3, 2, 2);
+                Fill(g, starCol, 11, 6, 2, 2);
+                Fill(g, starCol, 14, 8, 2, 2);
+                return;
+            }
+            if (c == "KR")
+            {
+                Fill(g, Color.White, 0, 0, w, h);
+                using (SolidBrush red = new SolidBrush(Color.FromArgb(205, 46, 58)))
+                using (SolidBrush blue = new SolidBrush(Color.FromArgb(0, 71, 160)))
+                {
+                    g.FillPie(red, 6, 3, 6, 6, 180, 180);
+                    g.FillPie(blue, 6, 3, 6, 6, 0, 180);
+                }
+                Fill(g, Color.FromArgb(30, 30, 35), 2, 2, 2, 2);
+                Fill(g, Color.FromArgb(30, 30, 35), 14, 2, 2, 2);
+                Fill(g, Color.FromArgb(30, 30, 35), 2, 8, 2, 2);
+                Fill(g, Color.FromArgb(30, 30, 35), 14, 8, 2, 2);
+                return;
+            }
+            if (c == "SE") { CrossFlag(g, w, h, Color.FromArgb(0, 106, 167), Color.FromArgb(254, 204, 0)); return; }
+            if (c == "FI") { CrossFlag(g, w, h, Color.White, Color.FromArgb(0, 47, 108)); return; }
+            if (c == "DK") { CrossFlag(g, w, h, Color.FromArgb(198, 12, 48), Color.White); return; }
+            if (c == "NO") { CrossFlag(g, w, h, Color.FromArgb(186, 12, 47), Color.FromArgb(0, 32, 91)); return; }
+            if (c == "CH")
+            {
+                Fill(g, Color.FromArgb(213, 43, 30), 0, 0, w, h);
+                Fill(g, Color.White, 8, 2, 2, 8);
+                Fill(g, Color.White, 5, 5, 8, 2);
+                return;
+            }
+            if (c == "PT")
+            {
+                Fill(g, Color.FromArgb(0, 102, 0), 0, 0, 7, h);
+                Fill(g, Color.FromArgb(255, 0, 0), 7, 0, w - 7, h);
+                Fill(g, Color.FromArgb(255, 204, 0), 6, 4, 2, 4);
+                return;
+            }
+            if (c == "CN")
+            {
+                Fill(g, Color.FromArgb(222, 41, 16), 0, 0, w, h);
+                Fill(g, Color.FromArgb(255, 222, 0), 3, 2, 3, 3);
+                return;
+            }
+            if (c == "TW")
+            {
+                Fill(g, Color.FromArgb(254, 0, 0), 0, 0, w, h);
+                Fill(g, Color.FromArgb(0, 0, 149), 0, 0, 9, 6);
+                Fill(g, Color.White, 3, 2, 3, 2);
+                return;
+            }
+            if (c == "SA")
+            {
+                Fill(g, Color.FromArgb(0, 108, 53), 0, 0, w, h);
+                Fill(g, Color.White, 4, 5, 10, 2);
+                return;
+            }
+            if (c == "AE")
+            {
+                HStripes(g, w, h, Color.FromArgb(0, 115, 47), Color.White, Color.FromArgb(20, 20, 24));
+                Fill(g, Color.FromArgb(255, 0, 0), 0, 0, 5, h);
+                return;
+            }
+            if (c == "SG")
+            {
+                Fill(g, Color.FromArgb(239, 51, 64), 0, 0, w, 6);
+                Fill(g, Color.White, 0, 6, w, 6);
+                Fill(g, Color.White, 3, 1, 3, 4);
+                return;
+            }
+            if (c == "TH")
+            {
+                Fill(g, Color.FromArgb(165, 25, 49), 0, 0, w, h);
+                Fill(g, Color.White, 0, 2, w, 8);
+                Fill(g, Color.FromArgb(45, 42, 74), 0, 4, w, 4);
+                return;
+            }
+            if (c == "VN")
+            {
+                Fill(g, Color.FromArgb(218, 37, 29), 0, 0, w, h);
+                Fill(g, Color.FromArgb(255, 255, 0), 7, 4, 4, 4);
+                return;
+            }
+
+            // Generic mini country-code badge fallback
+            Fill(g, Color.FromArgb(36, 40, 60), 0, 0, w, h);
+            string code = c.Length > 2 ? c.Substring(0, 2) : c;
+            TextRenderer.DrawText(g, code, FontManager.QueueTinyFont, new Rectangle(0, 0, w, h), Theme.TextPrimary,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+
+        private static void Fill(Graphics g, Color col, int x, int y, int w, int h)
+        {
+            using (SolidBrush b = new SolidBrush(col)) g.FillRectangle(b, x, y, w, h);
+        }
+
+        private static void HStripes(Graphics g, int w, int h, Color c1, Color c2, Color c3)
+        {
+            int sh = h / 3;
+            Fill(g, c1, 0, 0, w, sh);
+            Fill(g, c2, 0, sh, w, sh);
+            Fill(g, c3, 0, sh * 2, w, h - sh * 2);
+        }
+
+        private static void VStripes(Graphics g, int w, int h, Color c1, Color c2, Color c3)
+        {
+            int sw = w / 3;
+            Fill(g, c1, 0, 0, sw, h);
+            Fill(g, c2, sw, 0, sw, h);
+            Fill(g, c3, sw * 2, 0, w - sw * 2, h);
+        }
+
+        private static void CrossFlag(Graphics g, int w, int h, Color bg, Color cross)
+        {
+            Fill(g, bg, 0, 0, w, h);
+            Fill(g, cross, 5, 0, 3, h);
+            Fill(g, cross, 0, 5, w, 2);
+        }
+    }
+
+    /// <summary>
+    /// Double-buffered responsive card grid for browsing Discord Quests with a thin custom scrollbar.
+    /// </summary>
+    public class QuestGridControl : Control
+    {
+        private class CardHitTarget
+        {
+            public QuestItem Quest;
+            public Rectangle CardRect;
+            public Rectangle SimulateRect;
+            public Rectangle QueueRect;
+            public Rectangle OpenRect;
+            public Rectangle DoneRect;
+        }
+
+        private List<QuestItem> _quests = new List<QuestItem>();
+        private HashSet<string> _completedIds = new HashSet<string>(StringComparer.Ordinal);
+        private HashSet<string> _simulatingIds = new HashSet<string>(StringComparer.Ordinal);
+        private HashSet<string> _alsoGlobalIds = new HashSet<string>(StringComparer.Ordinal);
+        private string _effectiveCountry = "";
+        private bool _isLoading = false;
+        private int _scrollOffset = 0;
+        private int _contentHeight = 0;
+
+        private readonly List<CardHitTarget> _targets = new List<CardHitTarget>();
+        private Rectangle _resetFilterRect = Rectangle.Empty;
+        private bool _hoverResetFilter = false;
+
+        private int _hoveredCardIndex = -1;
+        private string _hoveredButton = "";
+        private int _pressedCardIndex = -1;
+        private string _pressedButton = "";
+
+        private bool _hoverScrollThumb = false;
+        private bool _draggingScrollThumb = false;
+        private int _dragStartY = 0;
+        private int _dragStartScroll = 0;
+        private Rectangle _scrollThumbRect = Rectangle.Empty;
+
+        public event Action<QuestItem> QuestClicked;
+        public event Action<QuestItem> SimulateClicked;
+        public event Action<QuestItem> StopSimulateClicked;
+        public event Action<QuestItem> QueueClicked;
+        public event Action<QuestItem> OpenDiscordClicked;
+        public event Action<QuestItem> ToggleDoneClicked;
+        public event Action ResetFiltersClicked;
+
+        public QuestGridControl()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                     ControlStyles.Selectable, true);
+            this.BackColor = Theme.BgBase;
+        }
+
+        public void SetData(List<QuestItem> quests, HashSet<string> completedIds, HashSet<string> simulatingIds, HashSet<string> alsoGlobalIds, string effectiveCountry, bool isLoading, bool resetScroll)
+        {
+            _quests = quests != null ? new List<QuestItem>(quests) : new List<QuestItem>();
+            _completedIds = completedIds != null ? new HashSet<string>(completedIds, StringComparer.Ordinal) : new HashSet<string>(StringComparer.Ordinal);
+            _simulatingIds = simulatingIds != null ? new HashSet<string>(simulatingIds, StringComparer.Ordinal) : new HashSet<string>(StringComparer.Ordinal);
+            _alsoGlobalIds = alsoGlobalIds != null ? new HashSet<string>(alsoGlobalIds, StringComparer.Ordinal) : new HashSet<string>(StringComparer.Ordinal);
+            _effectiveCountry = effectiveCountry ?? "";
+            _isLoading = isLoading;
+            if (resetScroll) _scrollOffset = 0;
+            ClampScroll();
+            Invalidate();
+        }
+
+        public void UpdateSimulatingIds(HashSet<string> simulatingIds)
+        {
+            _simulatingIds = simulatingIds != null ? new HashSet<string>(simulatingIds, StringComparer.Ordinal) : new HashSet<string>(StringComparer.Ordinal);
+            Invalidate();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            ClampScroll();
+            Invalidate();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (QuestsForm.TryForwardResizeHitTest(this, ref m)) return;
+            base.WndProc(ref m);
+        }
+
+        private int GetColumnCount()
+        {
+            return this.Width >= 980 ? 3 : 2;
+        }
+
+        private void ClampScroll()
+        {
+            const int padTop = 8;
+            const int padBottom = 16;
+            const int gap = 12;
+            const int cardHeight = 158;
+
+            int cols = GetColumnCount();
+            int rows = _quests.Count == 0 ? 0 : (_quests.Count + cols - 1) / cols;
+            _contentHeight = rows == 0 ? 0 : padTop + rows * cardHeight + (rows - 1) * gap + padBottom;
+            int maxScroll = Math.Max(0, _contentHeight - this.Height);
+            if (_scrollOffset > maxScroll) _scrollOffset = maxScroll;
+            if (_scrollOffset < 0) _scrollOffset = 0;
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            if (_contentHeight <= this.Height) return;
+            int step = (e.Delta > 0 ? -1 : 1) * 54;
+            _scrollOffset += step;
+            ClampScroll();
+            UpdateHoverFromCursor();
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (_draggingScrollThumb)
+            {
+                int trackHeight = Math.Max(1, this.Height - 16);
+                int maxScroll = Math.Max(1, _contentHeight - this.Height);
+                int thumbHeight = Math.Max(28, _scrollThumbRect.Height);
+                int usableTrack = Math.Max(1, trackHeight - thumbHeight);
+                int deltaY = e.Y - _dragStartY;
+                _scrollOffset = _dragStartScroll + (int)Math.Round(deltaY * (double)maxScroll / usableTrack);
+                ClampScroll();
+                Invalidate();
+                return;
+            }
+            UpdateHover(e.Location);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (!_draggingScrollThumb)
+            {
+                _hoveredCardIndex = -1;
+                _hoveredButton = "";
+                _hoverResetFilter = false;
+                _hoverScrollThumb = false;
+                this.Cursor = Cursors.Default;
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            this.Focus();
+
+            if (!_scrollThumbRect.IsEmpty && _scrollThumbRect.Contains(e.Location))
+            {
+                _draggingScrollThumb = true;
+                _dragStartY = e.Y;
+                _dragStartScroll = _scrollOffset;
+                this.Capture = true;
+                return;
+            }
+
+            if (_quests.Count == 0 && !_resetFilterRect.IsEmpty && _resetFilterRect.Contains(e.Location))
+            {
+                _pressedCardIndex = -2;
+                Invalidate();
+                return;
+            }
+
+            for (int i = 0; i < _targets.Count; i++)
+            {
+                CardHitTarget t = _targets[i];
+                if (!t.CardRect.Contains(e.Location)) continue;
+                _pressedCardIndex = i;
+                if (!t.SimulateRect.IsEmpty && t.SimulateRect.Contains(e.Location)) _pressedButton = "sim";
+                else if (!t.QueueRect.IsEmpty && t.QueueRect.Contains(e.Location)) _pressedButton = "queue";
+                else if (!t.OpenRect.IsEmpty && t.OpenRect.Contains(e.Location)) _pressedButton = "open";
+                else if (!t.DoneRect.IsEmpty && t.DoneRect.Contains(e.Location)) _pressedButton = "done";
+                else _pressedButton = "card";
+                Invalidate();
+                return;
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (_draggingScrollThumb)
+            {
+                _draggingScrollThumb = false;
+                this.Capture = false;
+                UpdateHover(e.Location);
+                Invalidate();
+                return;
+            }
+
+            int pIdx = _pressedCardIndex;
+            string pBtn = _pressedButton;
+            _pressedCardIndex = -1;
+            _pressedButton = "";
+
+            if (e.Button == MouseButtons.Left)
+            {
+                if (pIdx == -2 && !_resetFilterRect.IsEmpty && _resetFilterRect.Contains(e.Location))
+                {
+                    if (ResetFiltersClicked != null) ResetFiltersClicked();
+                }
+                else if (pIdx >= 0 && pIdx < _targets.Count)
+                {
+                    CardHitTarget t = _targets[pIdx];
+                    if (pBtn == "sim" && t.SimulateRect.Contains(e.Location))
+                    {
+                        bool simRunning = t.Quest != null && !string.IsNullOrEmpty(t.Quest.id) && _simulatingIds.Contains(t.Quest.id);
+                        if (simRunning) { if (StopSimulateClicked != null) StopSimulateClicked(t.Quest); }
+                        else { if (SimulateClicked != null) SimulateClicked(t.Quest); }
+                    }
+                    else if (pBtn == "queue" && t.QueueRect.Contains(e.Location))
+                    {
+                        if (QueueClicked != null) QueueClicked(t.Quest);
+                    }
+                    else if (pBtn == "open" && t.OpenRect.Contains(e.Location))
+                    {
+                        if (OpenDiscordClicked != null) OpenDiscordClicked(t.Quest);
+                    }
+                    else if (pBtn == "done" && t.DoneRect.Contains(e.Location))
+                    {
+                        if (ToggleDoneClicked != null) ToggleDoneClicked(t.Quest);
+                    }
+                    else if (pBtn == "card" && t.CardRect.Contains(e.Location))
+                    {
+                        if (QuestClicked != null) QuestClicked(t.Quest);
+                    }
+                }
+            }
+            UpdateHover(e.Location);
+            Invalidate();
+        }
+
+        private void UpdateHoverFromCursor()
+        {
+            Point pt = this.PointToClient(Cursor.Position);
+            if (this.ClientRectangle.Contains(pt)) UpdateHover(pt);
+        }
+
+        private void UpdateHover(Point pt)
+        {
+            int newCard = -1;
+            string newBtn = "";
+            bool newReset = !_resetFilterRect.IsEmpty && _resetFilterRect.Contains(pt);
+            bool newThumb = !_scrollThumbRect.IsEmpty && _scrollThumbRect.Contains(pt);
+
+            if (!newThumb && !newReset)
+            {
+                for (int i = 0; i < _targets.Count; i++)
+                {
+                    CardHitTarget t = _targets[i];
+                    if (!t.CardRect.Contains(pt)) continue;
+                    newCard = i;
+                    if (!t.SimulateRect.IsEmpty && t.SimulateRect.Contains(pt)) newBtn = "sim";
+                    else if (!t.QueueRect.IsEmpty && t.QueueRect.Contains(pt)) newBtn = "queue";
+                    else if (!t.OpenRect.IsEmpty && t.OpenRect.Contains(pt)) newBtn = "open";
+                    else if (!t.DoneRect.IsEmpty && t.DoneRect.Contains(pt)) newBtn = "done";
+                    else newBtn = "card";
+                    break;
+                }
+            }
+
+            if (newCard != _hoveredCardIndex || newBtn != _hoveredButton ||
+                newReset != _hoverResetFilter || newThumb != _hoverScrollThumb)
+            {
+                _hoveredCardIndex = newCard;
+                _hoveredButton = newBtn;
+                _hoverResetFilter = newReset;
+                _hoverScrollThumb = newThumb;
+                this.Cursor = (newCard >= 0 || newReset || newThumb) ? Cursors.Hand : Cursors.Default;
+                Invalidate();
+            }
+        }
+
+        private void OnThumbnailLoaded()
+        {
+            if (this.IsHandleCreated && !this.IsDisposed)
+            {
+                try { this.BeginInvoke(new Action(Invalidate)); } catch { }
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            _targets.Clear();
+            _resetFilterRect = Rectangle.Empty;
+            _scrollThumbRect = Rectangle.Empty;
+
+            if (_quests.Count == 0)
+            {
+                DrawEmptyState(g);
+                return;
+            }
+
+            const int padX = 18;
+            const int padTop = 8;
+            const int gap = 12;
+            const int cardHeight = 158;
+
+            int cols = GetColumnCount();
+            int usableWidth = Math.Max(200, this.Width - padX * 2 - (cols - 1) * gap);
+            int cardWidth = usableWidth / cols;
+            DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+
+            for (int i = 0; i < _quests.Count; i++)
+            {
+                int row = i / cols;
+                int col = i % cols;
+                int x = padX + col * (cardWidth + gap);
+                int y = padTop + row * (cardHeight + gap) - _scrollOffset;
+
+                if (y + cardHeight < -10 || y > this.Height + 10) continue;
+
+                Rectangle cardRect = new Rectangle(x, y, cardWidth, cardHeight);
+                CardHitTarget hit = DrawQuestCard(g, _quests[i], cardRect, _targets.Count, nowUtc);
+                _targets.Add(hit);
+            }
+
+            DrawThinScrollbar(g);
+        }
+
+        private void DrawEmptyState(Graphics g)
+        {
+            string title = _isLoading ? "Loading Discord Quests..." : "No quests match your filters";
+            string sub = _isLoading ? "Fetching latest quests and regional eligibility..." : "Try clearing your search or switching category tabs.";
+
+            int cy = Math.Max(80, this.Height / 2 - 42);
+            TextRenderer.DrawText(g, title, FontManager.ButtonFont,
+                new Rectangle(24, cy, this.Width - 48, 28), Theme.TextPrimary,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, sub, FontManager.SmallFont,
+                new Rectangle(24, cy + 30, this.Width - 48, 22), Theme.TextMuted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+            if (!_isLoading)
+            {
+                _resetFilterRect = new Rectangle((this.Width - 132) / 2, cy + 64, 132, 32);
+                bool pressed = _pressedCardIndex == -2;
+                Color bg = pressed ? Theme.AccentFocus : (_hoverResetFilter ? Theme.BgCardHover : Theme.BgSurface);
+                Color border = _hoverResetFilter ? Theme.AccentViolet : Theme.BorderHover;
+                using (GraphicsPath p = Program.GetRoundedPath(_resetFilterRect, 8))
+                {
+                    using (SolidBrush b = new SolidBrush(bg)) g.FillPath(b, p);
+                    using (Pen pen = new Pen(border, 1f)) g.DrawPath(pen, p);
+                }
+                TextRenderer.DrawText(g, "Reset Filters", FontManager.SmallFont, _resetFilterRect, Theme.TextPrimary,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+        }
+
+        private CardHitTarget DrawQuestCard(Graphics g, QuestItem q, Rectangle cardRect, int targetIdx, DateTimeOffset nowUtc)
+        {
+            CardHitTarget hit = new CardHitTarget { Quest = q, CardRect = cardRect };
+            bool isDone = !string.IsNullOrEmpty(q.id) && _completedIds.Contains(q.id);
+            bool cardHover = _hoveredCardIndex == targetIdx;
+
+            Color bg = cardHover ? Color.FromArgb(23, 23, 32) : Theme.BgSurface;
+            Color border = cardHover ? Theme.BorderHover : Theme.BorderSubtle;
+            using (GraphicsPath cardPath = Program.GetRoundedPath(cardRect, 12))
+            {
+                using (SolidBrush b = new SolidBrush(bg)) g.FillPath(b, cardPath);
+                using (Pen p = new Pen(border, 1f)) g.DrawPath(p, cardPath);
+            }
+
+            // Thumbnail (54x54)
+            Rectangle thumbRect = new Rectangle(cardRect.X + 12, cardRect.Y + 12, 54, 54);
+            string assetPath = q.GetThumbnailAssetPath();
+            Image thumb = assetPath != null ? QuestAssetCache.Instance.GetThumbnail(assetPath, 54, 10, OnThumbnailLoaded) : null;
+            if (thumb != null)
+            {
+                g.DrawImage(thumb, thumbRect);
+            }
+            else
+            {
+                using (GraphicsPath tp = Program.GetRoundedPath(thumbRect, 10))
+                {
+                    using (SolidBrush tb = new SolidBrush(Theme.BgInput)) g.FillPath(tb, tp);
+                    using (Pen tpen = new Pen(Theme.BorderSubtle, 1f)) g.DrawPath(tpen, tp);
+                }
+                string initials = GameDatabase.GetInitials(q.DisplayTitle);
+                if (initials.Length > 2) initials = initials.Substring(0, 2);
+                if (string.IsNullOrEmpty(initials)) initials = "Q";
+                TextRenderer.DrawText(g, initials.ToUpperInvariant(), FontManager.ButtonFont, thumbRect, Theme.TextMuted,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+
+            // Top-right badges (Countdown + 18+)
+            string countdown = q.GetCountdownLabel(nowUtc);
+            bool endingSoon = q.IsEndingSoon(nowUtc);
+            bool expired = q.IsExpired(nowUtc);
+            Color cdBg = expired ? Color.FromArgb(42, 26, 30) : (endingSoon ? Color.FromArgb(50, 38, 18) : Color.FromArgb(26, 26, 38));
+            Color cdFg = expired ? Color.FromArgb(235, 110, 120) : (endingSoon ? Color.FromArgb(245, 185, 75) : Theme.TextMuted);
+
+            int badgeRight = cardRect.Right - 12;
+            int cdWidth = Math.Max(52, TextRenderer.MeasureText(countdown, FontManager.BadgeFont).Width + 12);
+            Rectangle cdRect = new Rectangle(badgeRight - cdWidth, cardRect.Y + 12, cdWidth, 20);
+            DrawPill(g, cdRect, cdBg, Color.Transparent, countdown, cdFg, FontManager.BadgeFont, 6);
+            badgeRight = cdRect.X - 6;
+
+            if (q.IsAgeRestricted)
+            {
+                Rectangle ageRect = new Rectangle(badgeRight - 30, cardRect.Y + 12, 30, 20);
+                DrawPill(g, ageRect, Color.FromArgb(46, 26, 36), Color.Transparent, "18+", Color.FromArgb(240, 130, 145), FontManager.BadgeFont, 6);
+                badgeRight = ageRect.X - 6;
+            }
+
+            // Title & Publisher
+            int textX = thumbRect.Right + 12;
+            int titleWidth = Math.Max(60, badgeRight - textX);
+            Rectangle titleRect = new Rectangle(textX, cardRect.Y + 11, titleWidth, 22);
+            TextRenderer.DrawText(g, q.DisplayTitle, FontManager.CardTitleFont, titleRect, Theme.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+            string pub = !string.IsNullOrWhiteSpace(q.game_publisher) ? q.game_publisher : q.DisplayGameName;
+            Rectangle pubRect = new Rectangle(textX, cardRect.Y + 34, cardRect.Right - textX - 12, 18);
+            TextRenderer.DrawText(g, pub, FontManager.ListExeFont, pubRect, Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+            // Middle metadata pills: Reward + Task + Region
+            int metaY = cardRect.Y + 76;
+            int metaX = cardRect.X + 12;
+            int maxMetaX = cardRect.Right - 12;
+
+            string rewardText = q.GetPrimaryRewardLabel();
+            Color rewBg = q.HasOrbsReward ? Color.FromArgb(35, 29, 58) : (q.HasCollectibleReward ? Color.FromArgb(42, 32, 22) : Color.FromArgb(26, 28, 38));
+            Color rewFg = q.HasOrbsReward ? Color.FromArgb(175, 152, 255) : (q.HasCollectibleReward ? Color.FromArgb(245, 195, 105) : Theme.TextPrimary);
+            int rewW = Math.Min(maxMetaX - metaX, Math.Max(56, TextRenderer.MeasureText(rewardText, FontManager.BadgeFont).Width + 14));
+            if (rewW > 30)
+            {
+                DrawPill(g, new Rectangle(metaX, metaY, rewW, 22), rewBg, Color.Transparent, rewardText, rewFg, FontManager.BadgeFont, 6);
+                metaX += rewW + 6;
+            }
+
+            string taskText = q.GetPrimaryTaskLabel();
+            bool isDesktop = q.HasDesktopTask;
+            bool isSim = !string.IsNullOrEmpty(q.id) && _simulatingIds.Contains(q.id);
+            Color taskBg = isDesktop ? Color.FromArgb(22, 44, 34) : Color.FromArgb(24, 24, 34);
+            Color taskFg = isDesktop ? Theme.StatusGreen : Theme.TextMuted;
+            int taskW = Math.Min(maxMetaX - metaX, Math.Max(50, TextRenderer.MeasureText(taskText, FontManager.BadgeFont).Width + 14));
+            if (taskW > 42)
+            {
+                DrawPill(g, new Rectangle(metaX, metaY, taskW, 22), taskBg, Color.Transparent, taskText, taskFg, FontManager.BadgeFont, 6);
+                metaX += taskW + 6;
+            }
+
+            if (metaX + 54 <= maxMetaX)
+            {
+                bool eligible = string.IsNullOrEmpty(_effectiveCountry) || q.IsEligibleInRegion(_effectiveCountry);
+                bool hasAllowlist = q.region != null && !q.region.is_global && q.region.include != null && q.region.include.Count > 0;
+                string badgeCc = "";
+                string regText;
+                if (hasAllowlist)
+                {
+                    string normEff = QuestDatabase.NormalizeCountryCode(_effectiveCountry);
+                    badgeCc = (!string.IsNullOrEmpty(normEff) && q.region.include.Contains(normEff)) ? normEff : q.region.include[0];
+                    regText = q.region.include.Count == 1 ? badgeCc : (badgeCc + " +" + (q.region.include.Count - 1));
+                }
+                else
+                {
+                    regText = "Global";
+                }
+                Color regBg = eligible ? Color.FromArgb(24, 28, 38) : Color.FromArgb(48, 28, 24);
+                Color regFg = eligible ? Theme.TextMuted : Color.FromArgb(240, 150, 110);
+                Bitmap regIcon = string.IsNullOrEmpty(badgeCc) ? null : FlagIcons.GetFlag(badgeCc);
+                int iconExtra = regIcon != null ? 22 : 0;
+                int regW = Math.Min(maxMetaX - metaX, TextRenderer.MeasureText(regText, FontManager.BadgeFont).Width + 12 + iconExtra);
+                if (regW >= 44)
+                {
+                    Rectangle regRect = new Rectangle(metaX, metaY, regW, 22);
+                    if (regIcon != null)
+                        DrawPillWithIcon(g, regRect, regBg, Color.Transparent, regIcon, regText, regFg, FontManager.BadgeFont, 6);
+                    else
+                        DrawPill(g, regRect, regBg, Color.Transparent, regText, regFg, FontManager.BadgeFont, 6);
+                    metaX = regRect.Right + 6;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(q.id) && _alsoGlobalIds.Contains(q.id) && metaX + 46 <= maxMetaX)
+            {
+                int globW = Math.Min(maxMetaX - metaX, TextRenderer.MeasureText("Global", FontManager.BadgeFont).Width + 12);
+                if (globW >= 44)
+                {
+                    DrawPill(g, new Rectangle(metaX, metaY, globW, 22), Color.FromArgb(24, 28, 38), Color.Transparent, "Global", Theme.TextMuted, FontManager.BadgeFont, 6);
+                }
+            }
+
+            // Bottom action buttons row
+            int btnY = cardRect.Bottom - 38;
+            int btnH = 26;
+            int bx = cardRect.X + 12;
+
+            if (isDesktop)
+            {
+                int simW = 74;
+                hit.SimulateRect = new Rectangle(bx, btnY, simW, btnH);
+                bool hSim = cardHover && _hoveredButton == "sim";
+                bool pSim = _pressedCardIndex == targetIdx && _pressedButton == "sim";
+                Color simBg = isSim
+                    ? (pSim ? Color.FromArgb(185, 45, 65) : (hSim ? Color.FromArgb(235, 78, 98) : Color.FromArgb(215, 58, 78)))
+                    : (pSim ? Theme.AccentBlue : (hSim ? Color.FromArgb(140, 112, 255) : Theme.AccentViolet));
+                DrawPill(g, hit.SimulateRect, simBg, Color.Transparent, isSim ? "Stop" : "Simulate", Color.White, FontManager.BadgeFont, 7);
+                bx += simW + 6;
+
+                int qW = 68;
+                hit.QueueRect = new Rectangle(bx, btnY, qW, btnH);
+                bool hQ = cardHover && _hoveredButton == "queue";
+                bool pQ = _pressedCardIndex == targetIdx && _pressedButton == "queue";
+                Color qBg = pQ ? Theme.BorderHover : (hQ ? Theme.BgCardHover : Theme.BgInput);
+                DrawPill(g, hit.QueueRect, qBg, hQ ? Theme.BorderHover : Theme.BorderSubtle, "+ Queue", Theme.TextPrimary, FontManager.BadgeFont, 7);
+                bx += qW + 6;
+            }
+
+            int doneW = isDone ? 66 : 56;
+            hit.DoneRect = new Rectangle(cardRect.Right - 12 - doneW, btnY, doneW, btnH);
+            bool hDone = cardHover && _hoveredButton == "done";
+            Color dBg = isDone ? Color.FromArgb(24, 52, 38) : (hDone ? Theme.BgCardHover : Theme.BgInput);
+            Color dBorder = isDone ? Color.FromArgb(46, 120, 82) : (hDone ? Theme.BorderHover : Theme.BorderSubtle);
+            Color dFg = isDone ? Theme.StatusGreen : Theme.TextMuted;
+            DrawPill(g, hit.DoneRect, dBg, dBorder, isDone ? "\u2713 Done" : "Done", dFg, FontManager.BadgeFont, 7);
+
+            int openW = isDesktop ? 56 : Math.Min(120, hit.DoneRect.X - bx - 8);
+            if (openW >= 46)
+            {
+                hit.OpenRect = new Rectangle(bx, btnY, openW, btnH);
+                bool hOpen = cardHover && _hoveredButton == "open";
+                Color oBg = hOpen ? Theme.BgCardHover : Theme.BgInput;
+                string openLabel = isDesktop ? "Open" : "Open Quest";
+                DrawPill(g, hit.OpenRect, oBg, hOpen ? Theme.BorderHover : Theme.BorderSubtle, openLabel, Theme.TextPrimary, FontManager.BadgeFont, 7);
+            }
+
+            return hit;
+        }
+
+        private void DrawThinScrollbar(Graphics g)
+        {
+            if (_contentHeight <= this.Height) return;
+            int trackHeight = Math.Max(1, this.Height - 16);
+            int thumbHeight = Math.Max(28, (int)Math.Round(trackHeight * ((double)this.Height / _contentHeight)));
+            int maxScroll = Math.Max(1, _contentHeight - this.Height);
+            int maxThumbTop = Math.Max(1, trackHeight - thumbHeight);
+            int thumbTop = 8 + (int)Math.Round(maxThumbTop * ((double)_scrollOffset / maxScroll));
+
+            _scrollThumbRect = new Rectangle(this.Width - 8, thumbTop, 5, thumbHeight);
+            Color thumbColor = (_draggingScrollThumb || _hoverScrollThumb) ? Theme.TextMuted : Theme.BorderHover;
+            using (GraphicsPath p = Program.GetRoundedPath(_scrollThumbRect, 2))
+            using (SolidBrush b = new SolidBrush(thumbColor))
+            {
+                g.FillPath(b, p);
+            }
+        }
+
+        public static void DrawPill(Graphics g, Rectangle rect, Color fill, Color border, string text, Color fg, Font font, int radius)
+        {
+            using (GraphicsPath p = Program.GetRoundedPath(rect, radius))
+            {
+                if (fill.A > 0)
+                {
+                    using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
+                }
+                if (border.A > 0)
+                {
+                    using (Pen pen = new Pen(border, 1f)) g.DrawPath(pen, p);
+                }
+            }
+            if (!string.IsNullOrEmpty(text))
+            {
+                Rectangle textRect = new Rectangle(rect.X + 4, rect.Y, Math.Max(1, rect.Width - 8), rect.Height);
+                TextRenderer.DrawText(g, text, font, textRect, fg,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            }
+        }
+
+        public static void DrawPillWithIcon(Graphics g, Rectangle rect, Color fill, Color border, Image icon, string text, Color fg, Font font, int radius)
+        {
+            using (GraphicsPath p = Program.GetRoundedPath(rect, radius))
+            {
+                if (fill.A > 0)
+                {
+                    using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
+                }
+                if (border.A > 0)
+                {
+                    using (Pen pen = new Pen(border, 1f)) g.DrawPath(pen, p);
+                }
+            }
+            int textX = rect.X + 6;
+            if (icon != null)
+            {
+                int iy = rect.Y + (rect.Height - icon.Height) / 2;
+                g.DrawImage(icon, new Rectangle(rect.X + 7, iy, icon.Width, icon.Height));
+                textX = rect.X + 7 + icon.Width + 5;
+            }
+            if (!string.IsNullOrEmpty(text))
+            {
+                Rectangle textRect = new Rectangle(textX, rect.Y, Math.Max(1, rect.Right - textX - 5), rect.Height);
+                TextRenderer.DrawText(g, text, font, textRect, fg,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Inline detail drawer/modal inside QuestsForm showing full schedule, regional allowlist, rewards, and actions.
+    /// </summary>
+    public class QuestDetailOverlay : Control
+    {
+        private QuestItem _quest;
+        private bool _isDone;
+        private bool _isSimulating;
+        private string _effectiveCountry = "";
+
+        private Rectangle _cardRect;
+        private Rectangle _closeRect;
+        private Rectangle _simRect;
+        private Rectangle _queueRect;
+        private Rectangle _openRect;
+        private Rectangle _doneRect;
+        private string _hoveredBtn = "";
+
+        public event Action CloseRequested;
+        public event Action<QuestItem> SimulateClicked;
+        public event Action<QuestItem> StopSimulateClicked;
+        public event Action<QuestItem> QueueClicked;
+        public event Action<QuestItem> OpenDiscordClicked;
+        public event Action<QuestItem> ToggleDoneClicked;
+
+        public QuestDetailOverlay()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                     ControlStyles.Selectable, true);
+            this.Visible = false;
+        }
+
+        public QuestItem CurrentQuest
+        {
+            get { return _quest; }
+        }
+
+        public void ShowQuest(QuestItem quest, bool isDone, bool isSimulating, string effectiveCountry)
+        {
+            _quest = quest;
+            _isDone = isDone;
+            _isSimulating = isSimulating;
+            _effectiveCountry = effectiveCountry ?? "";
+            _hoveredBtn = "";
+            this.Visible = quest != null;
+            if (this.Visible)
+            {
+                this.BringToFront();
+                this.Focus();
+            }
+            Invalidate();
+        }
+
+        public void UpdateProgressState(bool isDone, bool isSimulating)
+        {
+            _isDone = isDone;
+            _isSimulating = isSimulating;
+            Invalidate();
+        }
+
+        public void HideOverlay()
+        {
+            _quest = null;
+            this.Visible = false;
+            _hoveredBtn = "";
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Escape)
+            {
+                if (CloseRequested != null) CloseRequested();
+                e.Handled = true;
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (QuestsForm.TryForwardResizeHitTest(this, ref m)) return;
+            base.WndProc(ref m);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            string next = HitButton(e.Location);
+            if (next != _hoveredBtn)
+            {
+                _hoveredBtn = next;
+                this.Cursor = string.IsNullOrEmpty(next) ? Cursors.Default : Cursors.Hand;
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            if (!_cardRect.Contains(e.Location))
+            {
+                if (CloseRequested != null) CloseRequested();
+                return;
+            }
+            string hit = HitButton(e.Location);
+            if (hit == "close") { if (CloseRequested != null) CloseRequested(); }
+            else if (hit == "sim" && _quest != null)
+            {
+                if (_isSimulating) { if (StopSimulateClicked != null) StopSimulateClicked(_quest); }
+                else { if (SimulateClicked != null) SimulateClicked(_quest); }
+            }
+            else if (hit == "queue" && _quest != null) { if (QueueClicked != null) QueueClicked(_quest); }
+            else if (hit == "open" && _quest != null) { if (OpenDiscordClicked != null) OpenDiscordClicked(_quest); }
+            else if (hit == "done" && _quest != null) { if (ToggleDoneClicked != null) ToggleDoneClicked(_quest); }
+        }
+
+        private string HitButton(Point pt)
+        {
+            if (!_closeRect.IsEmpty && _closeRect.Contains(pt)) return "close";
+            if (!_simRect.IsEmpty && _simRect.Contains(pt)) return "sim";
+            if (!_queueRect.IsEmpty && _queueRect.Contains(pt)) return "queue";
+            if (!_openRect.IsEmpty && _openRect.Contains(pt)) return "open";
+            if (!_doneRect.IsEmpty && _doneRect.Contains(pt)) return "done";
+            return "";
+        }
+
+        private void OnThumbnailLoaded()
+        {
+            if (this.IsHandleCreated && !this.IsDisposed)
+            {
+                try { this.BeginInvoke(new Action(Invalidate)); } catch { }
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (_quest == null) return;
+
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            using (SolidBrush dim = new SolidBrush(Color.FromArgb(196, 6, 6, 10)))
+            {
+                g.FillRectangle(dim, this.ClientRectangle);
+            }
+
+            int w = Math.Min(600, Math.Max(420, this.Width - 64));
+            int h = Math.Min(476, Math.Max(360, this.Height - 48));
+            _cardRect = new Rectangle((this.Width - w) / 2, (this.Height - h) / 2, w, h);
+
+            using (GraphicsPath cp = Program.GetRoundedPath(_cardRect, 14))
+            {
+                using (SolidBrush sb = new SolidBrush(Theme.BgSurface)) g.FillPath(sb, cp);
+                using (Pen pen = new Pen(Theme.BorderHover, 1f)) g.DrawPath(pen, cp);
+            }
+
+            _closeRect = new Rectangle(_cardRect.Right - 36, _cardRect.Y + 14, 24, 24);
+            Color closeCol = _hoveredBtn == "close" ? Color.White : Theme.TextMuted;
+            using (Pen xp = new Pen(closeCol, 1.8f))
+            {
+                g.DrawLine(xp, _closeRect.X + 6, _closeRect.Y + 6, _closeRect.Right - 6, _closeRect.Bottom - 6);
+                g.DrawLine(xp, _closeRect.Right - 6, _closeRect.Y + 6, _closeRect.X + 6, _closeRect.Bottom - 6);
+            }
+
+            // Header artwork + title
+            Rectangle thumbRect = new Rectangle(_cardRect.X + 20, _cardRect.Y + 18, 64, 64);
+            string asset = _quest.GetThumbnailAssetPath();
+            Image img = asset != null ? QuestAssetCache.Instance.GetThumbnail(asset, 64, 12, OnThumbnailLoaded) : null;
+            if (img != null) g.DrawImage(img, thumbRect);
+            else
+            {
+                using (GraphicsPath tp = Program.GetRoundedPath(thumbRect, 12))
+                using (SolidBrush tb = new SolidBrush(Theme.BgInput)) g.FillPath(tb, tp);
+            }
+
+            int hx = thumbRect.Right + 14;
+            int hw = _closeRect.X - hx - 8;
+            TextRenderer.DrawText(g, _quest.DisplayTitle, FontManager.ButtonFont,
+                new Rectangle(hx, _cardRect.Y + 18, hw, 26), Theme.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+            string pub = !string.IsNullOrWhiteSpace(_quest.game_publisher) ? _quest.game_publisher : _quest.DisplayGameName;
+            TextRenderer.DrawText(g, pub, FontManager.SmallFont,
+                new Rectangle(hx, _cardRect.Y + 44, hw, 18), Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+            DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+            string dateLine = FormatDateRange(_quest);
+            TextRenderer.DrawText(g, dateLine + "  \u00B7  " + _quest.GetCountdownLabel(nowUtc), FontManager.ListExeFont,
+                new Rectangle(hx, _cardRect.Y + 64, hw, 18), Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+            // Region eligibility box
+            int y = thumbRect.Bottom + 14;
+            bool eligible = string.IsNullOrEmpty(_effectiveCountry) || _quest.IsEligibleInRegion(_effectiveCountry);
+            string ccDisplay = string.IsNullOrEmpty(_effectiveCountry) ? "Global" : _effectiveCountry;
+            string regHeadline = (_quest.region == null || _quest.region.is_global)
+                ? "Available Worldwide"
+                : (eligible ? "Your Region (" + ccDisplay + ") Is Eligible" : "Your Region (" + ccDisplay + ") Is Restricted");
+            string regDetail = BuildFullRegionDetail(_quest.region);
+
+            Rectangle regBox = new Rectangle(_cardRect.X + 20, y, _cardRect.Width - 40, 48);
+            Color regBg = eligible ? Color.FromArgb(20, 40, 32) : Color.FromArgb(46, 26, 22);
+            Color regBorder = eligible ? Color.FromArgb(40, 96, 68) : Color.FromArgb(110, 56, 44);
+            Color regFg = eligible ? Theme.StatusGreen : Color.FromArgb(245, 160, 120);
+            using (GraphicsPath rp = Program.GetRoundedPath(regBox, 8))
+            {
+                using (SolidBrush rb = new SolidBrush(regBg)) g.FillPath(rb, rp);
+                using (Pen rpen = new Pen(regBorder, 1f)) g.DrawPath(rpen, rp);
+            }
+            TextRenderer.DrawText(g, regHeadline, FontManager.BadgeFont,
+                new Rectangle(regBox.X + 12, regBox.Y + 6, regBox.Width - 24, 18), regFg,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, regDetail, FontManager.ListExeFont,
+                new Rectangle(regBox.X + 12, regBox.Y + 25, regBox.Width - 24, 18), Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+            y = regBox.Bottom + 14;
+
+            // Tasks section
+            TextRenderer.DrawText(g, "Tasks & Requirements", FontManager.BadgeFont,
+                new Rectangle(_cardRect.X + 20, y, _cardRect.Width - 40, 18), Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            y += 22;
+            if (_quest.tasks != null && _quest.tasks.Count > 0)
+            {
+                for (int i = 0; i < Math.Min(3, _quest.tasks.Count); i++)
+                {
+                    QuestTaskInfo task = _quest.tasks[i];
+                    if (task == null) continue;
+                    string tLabel = "\u2022 " + task.GetDisplayLabel();
+                    if (task.IsDesktopPlay) tLabel += "  (Simulatable in FakeGameLauncher)";
+                    TextRenderer.DrawText(g, tLabel, FontManager.SmallFont,
+                        new Rectangle(_cardRect.X + 22, y, _cardRect.Width - 44, 20),
+                        task.IsDesktopPlay ? Theme.StatusGreen : Theme.TextPrimary,
+                        TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                    y += 22;
+                }
+            }
+            else
+            {
+                TextRenderer.DrawText(g, "\u2022 See quest details on Discord", FontManager.SmallFont,
+                    new Rectangle(_cardRect.X + 22, y, _cardRect.Width - 44, 20), Theme.TextPrimary,
+                    TextFormatFlags.Left | TextFormatFlags.NoPadding);
+                y += 22;
+            }
+
+            y += 8;
+            TextRenderer.DrawText(g, "Quest Rewards", FontManager.BadgeFont,
+                new Rectangle(_cardRect.X + 20, y, _cardRect.Width - 40, 18), Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            y += 22;
+            string instrPreview = "";
+            if (_quest.rewards != null && _quest.rewards.Count > 0)
+            {
+                for (int i = 0; i < Math.Min(2, _quest.rewards.Count); i++)
+                {
+                    QuestRewardInfo r = _quest.rewards[i];
+                    if (r == null) continue;
+                    string rText = "\u2022 " + (string.IsNullOrWhiteSpace(r.name) ? r.GetTypeLabel() : r.name) + " (" + r.GetTypeLabel() + ")";
+                    TextRenderer.DrawText(g, rText, FontManager.SmallFont,
+                        new Rectangle(_cardRect.X + 22, y, _cardRect.Width - 44, 20), Theme.TextPrimary,
+                        TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                    y += 22;
+                    if (string.IsNullOrEmpty(instrPreview) && !string.IsNullOrWhiteSpace(r.redemption_instructions))
+                        instrPreview = r.redemption_instructions.Replace("\r", " ").Replace("\n", " ");
+                }
+            }
+
+            if (!string.IsNullOrEmpty(instrPreview))
+            {
+                int availH = Math.Max(24, (_cardRect.Bottom - 78) - y);
+                TextRenderer.DrawText(g, instrPreview, FontManager.ListExeFont,
+                    new Rectangle(_cardRect.X + 22, y + 2, _cardRect.Width - 44, availH), Theme.TextMuted,
+                    TextFormatFlags.Left | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+            }
+
+            // Disclaimer + bottom buttons
+            TextRenderer.DrawText(g, "Local checklist only \u2014 quest completion is tracked by Discord.", FontManager.ListExeFont,
+                new Rectangle(_cardRect.X + 20, _cardRect.Bottom - 68, _cardRect.Width - 40, 18), Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+            int btnY = _cardRect.Bottom - 44;
+            int bx = _cardRect.X + 20;
+            _simRect = Rectangle.Empty;
+            _queueRect = Rectangle.Empty;
+
+            if (_quest.HasDesktopTask)
+            {
+                _simRect = new Rectangle(bx, btnY, 146, 30);
+                Color simBg = _isSimulating
+                    ? (_hoveredBtn == "sim" ? Color.FromArgb(235, 78, 98) : Color.FromArgb(215, 58, 78))
+                    : (_hoveredBtn == "sim" ? Theme.AccentBlue : Theme.AccentViolet);
+                QuestGridControl.DrawPill(g, _simRect, simBg, Color.Transparent,
+                    _isSimulating ? "Stop Simulation" : "Simulate in Launcher", Color.White, FontManager.BadgeFont, 8);
+                bx += 154;
+
+                _queueRect = new Rectangle(bx, btnY, 108, 30);
+                QuestGridControl.DrawPill(g, _queueRect,
+                    _hoveredBtn == "queue" ? Theme.BgCardHover : Theme.BgInput, Theme.BorderHover,
+                    "+ Add to Queue", Theme.TextPrimary, FontManager.BadgeFont, 8);
+                bx += 116;
+            }
+
+            _doneRect = new Rectangle(_cardRect.Right - 20 - 118, btnY, 118, 30);
+            QuestGridControl.DrawPill(g, _doneRect,
+                _isDone ? Color.FromArgb(24, 52, 38) : (_hoveredBtn == "done" ? Theme.BgCardHover : Theme.BgInput),
+                _isDone ? Color.FromArgb(46, 120, 82) : Theme.BorderHover,
+                _isDone ? "Completed \u2713" : "Mark Completed",
+                _isDone ? Theme.StatusGreen : Theme.TextPrimary, FontManager.BadgeFont, 8);
+
+            int openW = Math.Min(138, _doneRect.X - bx - 8);
+            _openRect = openW >= 80 ? new Rectangle(bx, btnY, openW, 30) : Rectangle.Empty;
+            if (!_openRect.IsEmpty)
+            {
+                QuestGridControl.DrawPill(g, _openRect,
+                    _hoveredBtn == "open" ? Theme.BgCardHover : Theme.BgInput, Theme.BorderHover,
+                    "Open in Discord", Theme.TextPrimary, FontManager.BadgeFont, 8);
+            }
+        }
+
+        private static string FormatDateRange(QuestItem q)
+        {
+            string s = q.StartsAtUtc == DateTimeOffset.MinValue ? "?" : q.StartsAtUtc.ToLocalTime().ToString("MMM d");
+            string e = q.ExpiresAtUtc == DateTimeOffset.MinValue ? "?" : q.ExpiresAtUtc.ToLocalTime().ToString("MMM d, HH:mm");
+            return "Starts " + s + " \u2022 Expires " + e;
+        }
+
+        private static string BuildFullRegionDetail(QuestRegionInfo region)
+        {
+            if (region == null) return "Region data unavailable (treated as global).";
+            if (region.is_global)
+            {
+                if (region.exclude != null && region.exclude.Count > 0)
+                    return "Global except: " + string.Join(", ", region.exclude.ToArray());
+                return "Available in all supported Discord regions.";
+            }
+            if (region.include != null && region.include.Count > 0)
+            {
+                int cap = Math.Min(16, region.include.Count);
+                string[] slice = new string[cap];
+                for (int i = 0; i < cap; i++) slice[i] = region.include[i];
+                string list = string.Join(", ", slice);
+                if (region.include.Count > cap) list += " +" + (region.include.Count - cap) + " more";
+                return "Allowed: " + list;
+            }
+            return "Global";
+        }
+    }
+
+    /// <summary>
+    /// Reusable Discord Quests explorer panel hosted inside MainForm (unified docked mode) or QuestsForm.
+    /// </summary>
+    public class QuestsPanel : UserControl
+    {
+        private class PillRegion
+        {
+            public string Key;
+            public string Label;
+            public Rectangle Rect;
+        }
+
+        private const int TitleBarHeight = 44;
+        private const int CategoryBarHeight = 38;
+        private const int FilterBarHeight = 42;
+
+        private string _activeCategory = "active";
+        private string _sortMode = "ending_soon";
+        private bool _filterRegionOnly = false;
+        private bool _hideCompleted = false;
+        private string _regionOverride = "";
+        private readonly int[] _catCounts = new int[8];
+
+        private readonly List<PillRegion> _categoryPills = new List<PillRegion>();
+        private Rectangle _refreshRect;
+        private Rectangle _minRect;
+        private Rectangle _maxRect;
+        private Rectangle _closeRect;
+        private Rectangle _hideDoneRect;
+        private Rectangle _regionToggleRect;
+        private Rectangle _regionMenuRect;
+        private Rectangle _sortRect;
+        private Rectangle _clearSearchRect;
+
+        private string _hoveredElement = "";
+        private string _pressedElement = "";
+
+        private Panel _pnlSearch;
+        private TextBox _txtSearch;
+        private System.Windows.Forms.Timer _debounceSearch;
+        private QuestGridControl _grid;
+        private QuestDetailOverlay _detailOverlay;
+        private ContextMenuStrip _regionMenu;
+        private ContextMenuStrip _sortMenu;
+
+        public bool ShowOuterBorder { get; set; }
+
+        public event Action<GameItem> SimulateRequested;
+        public event Action<GameItem> StopSimulateRequested;
+        public event Action<GameItem> QueueRequested;
+        public event Action CloseRequested;
+        public event Action MinimizeRequested;
+        public event Action MaximizeToggleRequested;
+        public event Action DragRequested;
+
+        public QuestsPanel()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            this.BackColor = Theme.BgBase;
+            this.ForeColor = Theme.TextPrimary;
+
+            QuestDatabase.Instance.EnsureStateLoaded();
+            _filterRegionOnly = QuestDatabase.Instance.FilterRegionOnly;
+            _hideCompleted = QuestDatabase.Instance.HideCompleted;
+            _regionOverride = QuestDatabase.Instance.RegionOverride ?? "";
+
+            BuildChildControls();
+            QuestDatabase.Instance.OnQuestsUpdated += HandleDatabaseChanged;
+            QuestDatabase.Instance.OnStateChanged += HandleDatabaseChanged;
+            QuestDatabase.Instance.OnProgressUpdated += HandleProgressUpdated;
+            RefreshView(true);
+        }
+
+        private void BuildChildControls()
+        {
+            _debounceSearch = new System.Windows.Forms.Timer();
+            _debounceSearch.Interval = 120;
+            _debounceSearch.Tick += (s, e) =>
+            {
+                _debounceSearch.Stop();
+                RefreshView(true);
+            };
+
+            _pnlSearch = new Panel();
+            _pnlSearch.BackColor = Theme.BgInput;
+            _pnlSearch.Location = new Point(18, TitleBarHeight + CategoryBarHeight + 5);
+            _pnlSearch.Size = new Size(280, 32);
+
+            _txtSearch = new TextBox();
+            _txtSearch.BorderStyle = BorderStyle.None;
+            _txtSearch.BackColor = Theme.BgInput;
+            _txtSearch.ForeColor = Theme.TextPrimary;
+            _txtSearch.Font = FontManager.SmallFont;
+            _txtSearch.Location = new Point(10, 8);
+            _txtSearch.Size = new Size(242, 18);
+            _txtSearch.TextChanged += (s, e) =>
+            {
+                _pnlSearch.Invalidate();
+                _debounceSearch.Stop();
+                _debounceSearch.Start();
+            };
+            _pnlSearch.Controls.Add(_txtSearch);
+            _pnlSearch.Paint += (s, pe) =>
+            {
+                pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle br = new Rectangle(0, 0, _pnlSearch.Width - 1, _pnlSearch.Height - 1);
+                using (GraphicsPath bp = Program.GetRoundedPath(br, 8))
+                using (Pen pen = new Pen(_txtSearch.Focused ? Theme.AccentFocus : Theme.BorderSubtle, 1f))
+                {
+                    pe.Graphics.DrawPath(pen, bp);
+                }
+                if (string.IsNullOrEmpty(_txtSearch.Text))
+                {
+                    TextRenderer.DrawText(pe.Graphics, "Search quests, games, or rewards...", FontManager.SmallFont,
+                        new Point(10, 7), Theme.TextMuted);
+                }
+            };
+            _txtSearch.GotFocus += (s, e) => _pnlSearch.Invalidate();
+            _txtSearch.LostFocus += (s, e) => _pnlSearch.Invalidate();
+            this.Controls.Add(_pnlSearch);
+
+            _grid = new QuestGridControl();
+            _grid.QuestClicked += q =>
+            {
+                if (q != null)
+                {
+                    _detailOverlay.ShowQuest(
+                        q,
+                        QuestDatabase.Instance.IsCompleted(q.id),
+                        QuestDatabase.Instance.IsQuestSimulating(q.id),
+                        QuestDatabase.Instance.EffectiveCountry);
+                }
+            };
+            _grid.SimulateClicked += HandleSimulateQuest;
+            _grid.StopSimulateClicked += HandleStopSimulateQuest;
+            _grid.QueueClicked += HandleQueueQuest;
+            _grid.OpenDiscordClicked += HandleOpenQuestUrl;
+            _grid.ToggleDoneClicked += q =>
+            {
+                if (q != null && !string.IsNullOrEmpty(q.id)) QuestDatabase.Instance.ToggleCompleted(q.id);
+            };
+            _grid.ResetFiltersClicked += ResetAllFilters;
+            this.Controls.Add(_grid);
+
+            _detailOverlay = new QuestDetailOverlay();
+            _detailOverlay.Dock = DockStyle.Fill;
+            _detailOverlay.CloseRequested += () => _detailOverlay.HideOverlay();
+            _detailOverlay.SimulateClicked += HandleSimulateQuest;
+            _detailOverlay.StopSimulateClicked += HandleStopSimulateQuest;
+            _detailOverlay.QueueClicked += HandleQueueQuest;
+            _detailOverlay.OpenDiscordClicked += HandleOpenQuestUrl;
+            _detailOverlay.ToggleDoneClicked += q =>
+            {
+                if (q != null && !string.IsNullOrEmpty(q.id))
+                {
+                    bool done = QuestDatabase.Instance.ToggleCompleted(q.id);
+                    _detailOverlay.UpdateProgressState(
+                        done,
+                        QuestDatabase.Instance.IsQuestSimulating(q.id));
+                }
+            };
+            this.Controls.Add(_detailOverlay);
+
+            _regionMenu = new ContextMenuStrip();
+            _regionMenu.Renderer = new DarkMenuRenderer();
+            _regionMenu.ShowImageMargin = true;
+            _regionMenu.ImageScalingSize = new Size(18, 12);
+            BuildRegionMenu();
+
+            _sortMenu = new ContextMenuStrip();
+            _sortMenu.Renderer = new DarkMenuRenderer();
+            _sortMenu.ShowImageMargin = false;
+            BuildSortMenu();
+
+            LayoutChildren();
+        }
+
+        private void BuildRegionMenu()
+        {
+            _regionMenu.Items.Clear();
+
+            ToolStripMenuItem allItem = new ToolStripMenuItem("All Regions", FlagIcons.GetGlobeIcon());
+            allItem.Click += (s, e) => SelectAllRegions();
+            _regionMenu.Items.Add(allItem);
+
+            string detected = QuestDatabase.Instance.DetectedCountry;
+            string autoLabel = string.IsNullOrEmpty(detected) ? "Auto (Detect)" : ("Auto (" + detected + ")");
+            Image autoImg = string.IsNullOrEmpty(detected) ? (Image)FlagIcons.GetGlobeIcon() : (Image)FlagIcons.GetFlag(detected);
+            ToolStripMenuItem autoItem = new ToolStripMenuItem(autoLabel, autoImg);
+            autoItem.Click += (s, e) => SelectAutoRegion();
+            _regionMenu.Items.Add(autoItem);
+            _regionMenu.Items.Add(new ToolStripSeparator());
+
+            string[] codes = new string[] { "US", "UK", "DE", "CA", "TR", "FR", "JP", "BR", "AU", "ES", "PL", "KR" };
+            for (int i = 0; i < codes.Length; i++)
+            {
+                string code = codes[i];
+                string label = code + "  " + FlagIcons.GetCountryDisplayName(code);
+                ToolStripMenuItem item = new ToolStripMenuItem(label, FlagIcons.GetFlag(code));
+                item.Click += (s, e) => SelectRegionOverride(code);
+                _regionMenu.Items.Add(item);
+            }
+        }
+
+        private void BuildSortMenu()
+        {
+            _sortMenu.Items.Clear();
+            AddSortOption("Ending Soon", "ending_soon");
+            AddSortOption("Newest", "newest");
+            AddSortOption("Quest Name", "name");
+        }
+
+        private void AddSortOption(string label, string key)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(label);
+            item.Click += (s, e) =>
+            {
+                _sortMode = key;
+                RefreshView(true);
+                Invalidate();
+            };
+            _sortMenu.Items.Add(item);
+        }
+
+        public void SelectAllRegions()
+        {
+            _regionOverride = "";
+            _filterRegionOnly = false;
+            QuestDatabase.Instance.SetFilterPreferences(false, _hideCompleted, "");
+            RefreshView(true);
+            Invalidate();
+        }
+
+        public void SelectAutoRegion()
+        {
+            _regionOverride = "";
+            _filterRegionOnly = !string.IsNullOrEmpty(QuestDatabase.Instance.DetectedCountry);
+            QuestDatabase.Instance.SetFilterPreferences(_filterRegionOnly, _hideCompleted, "");
+            RefreshView(true);
+            Invalidate();
+        }
+
+        public void SelectRegionOverride(string code)
+        {
+            _regionOverride = QuestDatabase.NormalizeCountryCode(code);
+            _filterRegionOnly = !string.IsNullOrEmpty(_regionOverride);
+            QuestDatabase.Instance.SetFilterPreferences(_filterRegionOnly, _hideCompleted, _regionOverride);
+            RefreshView(true);
+            Invalidate();
+        }
+
+        public void HandleSimulateQuest(QuestItem quest)
+        {
+            if (quest == null || !quest.HasDesktopTask) return;
+            GameItem game = QuestDatabase.Instance.ResolveGameForQuest(quest);
+            if (game != null && SimulateRequested != null) SimulateRequested(game);
+        }
+
+        public void HandleStopSimulateQuest(QuestItem quest)
+        {
+            if (quest == null || !quest.HasDesktopTask) return;
+            GameItem game = QuestDatabase.Instance.ResolveGameForQuest(quest);
+            if (game != null && StopSimulateRequested != null) StopSimulateRequested(game);
+        }
+
+        public void HandleQueueQuest(QuestItem quest)
+        {
+            if (quest == null || !quest.HasDesktopTask) return;
+            GameItem game = QuestDatabase.Instance.ResolveGameForQuest(quest);
+            if (game != null && QueueRequested != null) QueueRequested(game);
+        }
+
+        private static void HandleOpenQuestUrl(QuestItem quest)
+        {
+            if (quest == null) return;
+            try { Process.Start(quest.GetDiscordQuestUrl()); }
+            catch (Exception ex) { Program.LogError("OpenQuestUrl", ex); }
+        }
+
+        public void ResetAllFilters()
+        {
+            _activeCategory = "active";
+            _txtSearch.Text = "";
+            _filterRegionOnly = false;
+            _hideCompleted = false;
+            QuestDatabase.Instance.SetFilterPreferences(false, false, _regionOverride);
+            RefreshView(true);
+            Invalidate();
+        }
+
+        public void SetFiltersForTesting(string category, string query, bool regionOnly, bool hideCompleted, string sortMode)
+        {
+            if (!string.IsNullOrEmpty(category)) _activeCategory = category;
+            if (query != null) _txtSearch.Text = query;
+            _filterRegionOnly = regionOnly;
+            _hideCompleted = hideCompleted;
+            if (!string.IsNullOrEmpty(sortMode)) _sortMode = sortMode;
+            RefreshView(true);
+        }
+
+        public void OpenDetailForTesting(QuestItem quest)
+        {
+            string qid = quest != null ? quest.id : "";
+            _detailOverlay.ShowQuest(
+                quest,
+                QuestDatabase.Instance.IsCompleted(qid),
+                QuestDatabase.Instance.IsQuestSimulating(qid),
+                QuestDatabase.Instance.EffectiveCountry);
+        }
+
+        public bool HandleEscape()
+        {
+            if (_detailOverlay != null && _detailOverlay.Visible)
+            {
+                _detailOverlay.HideOverlay();
+                return true;
+            }
+            if (_txtSearch != null && !string.IsNullOrEmpty(_txtSearch.Text))
+            {
+                _txtSearch.Text = "";
+                return true;
+            }
+            return false;
+        }
+
+        private void HandleDatabaseChanged()
+        {
+            if (this.IsHandleCreated && !this.IsDisposed)
+            {
+                try { this.BeginInvoke(new Action(() => RefreshView(false))); } catch { }
+            }
+        }
+
+        private void HandleProgressUpdated()
+        {
+            if (this.IsHandleCreated && !this.IsDisposed)
+            {
+                try
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        HashSet<string> sim = QuestDatabase.Instance.GetSimulatingQuestIdsSnapshot();
+                        if (_grid != null) _grid.UpdateSimulatingIds(sim);
+                        if (_detailOverlay != null && _detailOverlay.Visible && _detailOverlay.CurrentQuest != null)
+                        {
+                            string qid = _detailOverlay.CurrentQuest.id ?? "";
+                            _detailOverlay.UpdateProgressState(QuestDatabase.Instance.IsCompleted(qid), sim.Contains(qid));
+                        }
+                    }));
+                }
+                catch { }
+            }
+        }
+
+        public void RefreshView(bool resetScroll)
+        {
+            List<QuestItem> all = QuestDatabase.Instance.GetQuestsSnapshot();
+            HashSet<string> done = QuestDatabase.Instance.GetCompletedIdsSnapshot();
+            HashSet<string> sim = QuestDatabase.Instance.GetSimulatingQuestIdsSnapshot();
+            string effectiveCc = QuestDatabase.Instance.EffectiveCountry;
+            string q = _txtSearch != null ? _txtSearch.Text : "";
+            DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+
+            string[] keys = new string[] { "active", "desktop", "ending", "orbs", "collectibles", "expired", "done", "all" };
+            for (int i = 0; i < keys.Length; i++)
+            {
+                _catCounts[i] = QuestDatabase.FilterQuests(
+                    all, keys[i], "", _filterRegionOnly, effectiveCc, _hideCompleted, done, _sortMode, nowUtc).Count;
+            }
+
+            HashSet<string> alsoGlobalIds;
+            List<QuestItem> filtered = QuestDatabase.FilterQuests(
+                all, _activeCategory, q, _filterRegionOnly, effectiveCc, _hideCompleted, done, _sortMode, nowUtc, out alsoGlobalIds);
+
+            if (_grid != null)
+                _grid.SetData(filtered, done, sim, alsoGlobalIds, effectiveCc, QuestDatabase.Instance.IsUpdating, resetScroll);
+
+            if (_detailOverlay != null && _detailOverlay.Visible && _detailOverlay.CurrentQuest != null)
+            {
+                string qid = _detailOverlay.CurrentQuest.id ?? "";
+                _detailOverlay.UpdateProgressState(done.Contains(qid), sim.Contains(qid));
+            }
+
+            Invalidate(new Rectangle(0, 0, this.Width, TitleBarHeight + CategoryBarHeight + FilterBarHeight + 4));
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            LayoutChildren();
+            Invalidate();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (QuestsForm.TryForwardResizeHitTest(this, ref m)) return;
+            base.WndProc(ref m);
+        }
+
+        private void LayoutChildren()
+        {
+            int topOffset = TitleBarHeight + CategoryBarHeight + FilterBarHeight + 4;
+            if (_grid != null)
+            {
+                _grid.Location = new Point(0, topOffset);
+                _grid.Size = new Size(this.ClientSize.Width, Math.Max(100, this.ClientSize.Height - topOffset));
+            }
+            if (_pnlSearch != null)
+            {
+                int searchW = Math.Max(160, Math.Min(340, this.ClientSize.Width - 488));
+                _pnlSearch.Location = new Point(18, TitleBarHeight + CategoryBarHeight + 5);
+                _pnlSearch.Size = new Size(searchW, 32);
+                if (_txtSearch != null) _txtSearch.Size = new Size(Math.Max(80, searchW - 24), 18);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            string next = HitChromeElement(e.Location);
+            if (next != _hoveredElement)
+            {
+                _hoveredElement = next;
+                this.Cursor = string.IsNullOrEmpty(next) ? Cursors.Default : Cursors.Hand;
+                Invalidate(new Rectangle(0, 0, this.Width, TitleBarHeight + CategoryBarHeight + FilterBarHeight + 4));
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (!string.IsNullOrEmpty(_hoveredElement))
+            {
+                _hoveredElement = "";
+                this.Cursor = Cursors.Default;
+                Invalidate(new Rectangle(0, 0, this.Width, TitleBarHeight + CategoryBarHeight + FilterBarHeight + 4));
+            }
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            base.OnMouseDoubleClick(e);
+            if (e.Button == MouseButtons.Left && e.Y <= TitleBarHeight && string.IsNullOrEmpty(HitChromeElement(e.Location)))
+            {
+                if (MaximizeToggleRequested != null) MaximizeToggleRequested();
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            string hit = HitChromeElement(e.Location);
+            if (string.IsNullOrEmpty(hit))
+            {
+                if (e.Y <= TitleBarHeight + CategoryBarHeight && DragRequested != null) DragRequested();
+                return;
+            }
+            _pressedElement = hit;
+            Invalidate(new Rectangle(0, 0, this.Width, TitleBarHeight + CategoryBarHeight + FilterBarHeight + 4));
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            string pressed = _pressedElement;
+            _pressedElement = "";
+            if (e.Button != MouseButtons.Left || string.IsNullOrEmpty(pressed)) return;
+            string hit = HitChromeElement(e.Location);
+            if (hit != pressed)
+            {
+                Invalidate(new Rectangle(0, 0, this.Width, TitleBarHeight + CategoryBarHeight + FilterBarHeight + 4));
+                return;
+            }
+
+            if (hit == "close") { if (CloseRequested != null) CloseRequested(); return; }
+            else if (hit == "min") { if (MinimizeRequested != null) MinimizeRequested(); return; }
+            else if (hit == "max") { if (MaximizeToggleRequested != null) MaximizeToggleRequested(); }
+            else if (hit == "refresh") QuestDatabase.Instance.RefreshAsync(true);
+            else if (hit == "hide_done")
+            {
+                _hideCompleted = !_hideCompleted;
+                QuestDatabase.Instance.SetFilterPreferences(_filterRegionOnly, _hideCompleted, _regionOverride);
+                RefreshView(true);
+            }
+            else if (hit == "region_toggle")
+            {
+                _filterRegionOnly = !_filterRegionOnly;
+                QuestDatabase.Instance.SetFilterPreferences(_filterRegionOnly, _hideCompleted, _regionOverride);
+                RefreshView(true);
+            }
+            else if (hit == "region_menu")
+            {
+                BuildRegionMenu();
+                _regionMenu.Show(this, new Point(_regionMenuRect.X, _regionMenuRect.Bottom + 4));
+            }
+            else if (hit == "sort")
+            {
+                _sortMenu.Show(this, new Point(_sortRect.X, _sortRect.Bottom + 4));
+            }
+            else if (hit == "clear_search")
+            {
+                _txtSearch.Text = "";
+            }
+            else if (hit.StartsWith("cat:", StringComparison.Ordinal))
+            {
+                _activeCategory = hit.Substring(4);
+                RefreshView(true);
+            }
+            Invalidate(new Rectangle(0, 0, this.Width, TitleBarHeight + CategoryBarHeight + FilterBarHeight + 4));
+        }
+
+        private string HitChromeElement(Point pt)
+        {
+            if (_closeRect.Contains(pt)) return "close";
+            if (_maxRect.Contains(pt)) return "max";
+            if (_minRect.Contains(pt)) return "min";
+            if (_refreshRect.Contains(pt)) return "refresh";
+            if (_hideDoneRect.Contains(pt)) return "hide_done";
+            if (_regionToggleRect.Contains(pt)) return "region_toggle";
+            if (_regionMenuRect.Contains(pt)) return "region_menu";
+            if (_sortRect.Contains(pt)) return "sort";
+            if (!_clearSearchRect.IsEmpty && _clearSearchRect.Contains(pt)) return "clear_search";
+            for (int i = 0; i < _categoryPills.Count; i++)
+            {
+                if (_categoryPills[i].Rect.Contains(pt)) return "cat:" + _categoryPills[i].Key;
+            }
+            return "";
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            // Titlebar
+            TextRenderer.DrawText(g, "Discord Quests", FontManager.ButtonFont,
+                new Rectangle(18, 10, 150, 24), Theme.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+            int totalCount = QuestDatabase.Instance.Count;
+            string statusText = QuestDatabase.Instance.IsUpdating
+                ? "Syncing quests..."
+                : (totalCount == 0 ? "Loading catalog..." : _catCounts[0] + " active \u00B7 " + FormatUpdatedAgo(QuestDatabase.Instance.LastUpdatedUtc));
+
+            TextRenderer.DrawText(g, statusText, FontManager.ListExeFont,
+                new Rectangle(162, 12, Math.Max(80, this.ClientSize.Width - 320), 22), Theme.TextMuted,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+
+            Form parentForm = this.FindForm();
+            bool isMax = parentForm != null && parentForm.WindowState == FormWindowState.Maximized;
+
+            int rightX = this.ClientSize.Width - 16;
+            _closeRect = new Rectangle(rightX - 28, 8, 28, 28);
+            _maxRect = new Rectangle(_closeRect.X - 32, 8, 28, 28);
+            _minRect = new Rectangle(_maxRect.X - 32, 8, 28, 28);
+            _refreshRect = new Rectangle(_minRect.X - 36, 8, 28, 28);
+
+            DrawTitleIconBtn(g, _refreshRect, "refresh", "\u21BB", Theme.TextPrimary);
+            DrawTitleIconBtn(g, _minRect, "min", "\u2013", Theme.TextPrimary);
+            DrawTitleIconBtn(g, _maxRect, "max", isMax ? "\u2752" : "\u25A1", Theme.TextPrimary);
+            DrawTitleIconBtn(g, _closeRect, "close", "\u2715", Color.FromArgb(245, 110, 115));
+
+            // Category pills
+            DrawCategoryStrip(g);
+
+            // Filter toolbar right side (next to search box)
+            int filterY = TitleBarHeight + CategoryBarHeight + 5;
+            int fx = this.ClientSize.Width - 18;
+
+            string sortLabel = "Sort: " + (_sortMode == "name" ? "Name" : (_sortMode == "newest" ? "Newest" : "Ending Soon"));
+            int sortW = Math.Max(108, TextRenderer.MeasureText(sortLabel, FontManager.BadgeFont).Width + 20);
+            _sortRect = new Rectangle(fx - sortW, filterY, sortW, 32);
+            DrawToolbarChip(g, _sortRect, "sort", sortLabel, false);
+            fx = _sortRect.X - 8;
+
+            _regionMenuRect = new Rectangle(fx - 26, filterY, 26, 32);
+            DrawToolbarChip(g, _regionMenuRect, "region_menu", "\u25BE", false);
+            fx = _regionMenuRect.X - 2;
+
+            string cc = QuestDatabase.Instance.EffectiveCountry;
+            string regLabel = string.IsNullOrEmpty(cc) ? "All Regions" : ("Available in " + cc);
+            Image regFlag = string.IsNullOrEmpty(cc) ? (Image)FlagIcons.GetGlobeIcon() : (Image)FlagIcons.GetFlag(cc);
+            int regW = Math.Max(114, TextRenderer.MeasureText(regLabel, FontManager.BadgeFont).Width + 40);
+            _regionToggleRect = new Rectangle(fx - regW, filterY, regW, 32);
+            DrawToolbarChipWithIcon(g, _regionToggleRect, "region_toggle", regFlag, regLabel, _filterRegionOnly);
+            fx = _regionToggleRect.X - 8;
+
+            _hideDoneRect = new Rectangle(fx - 92, filterY, 92, 32);
+            DrawToolbarChip(g, _hideDoneRect, "hide_done", "Hide Done", _hideCompleted);
+
+            if (_txtSearch != null && !string.IsNullOrEmpty(_txtSearch.Text))
+            {
+                _clearSearchRect = new Rectangle(_pnlSearch.Right + 6, filterY + 4, 24, 24);
+                DrawTitleIconBtn(g, _clearSearchRect, "clear_search", "\u2715", Theme.TextMuted);
+            }
+            else
+            {
+                _clearSearchRect = Rectangle.Empty;
+            }
+
+            if (ShowOuterBorder && !isMax)
+            {
+                using (GraphicsPath borderPath = Program.GetRoundedPath(new Rectangle(0, 0, this.Width - 1, this.Height - 1), 16))
+                using (Pen borderPen = new Pen(Theme.BorderSubtle, 1f))
+                {
+                    g.DrawPath(borderPen, borderPath);
+                }
+            }
+        }
+
+        private void DrawTitleIconBtn(Graphics g, Rectangle rect, string key, string glyph, Color hoverColor)
+        {
+            bool hov = _hoveredElement == key;
+            bool prs = _pressedElement == key;
+            if (hov || prs)
+            {
+                Color bg = prs ? Theme.BorderHover : Theme.BgCardHover;
+                using (GraphicsPath p = Program.GetRoundedPath(rect, 7))
+                using (SolidBrush b = new SolidBrush(bg))
+                {
+                    g.FillPath(b, p);
+                }
+            }
+            Color fg = hov ? hoverColor : Theme.TextMuted;
+            TextRenderer.DrawText(g, glyph, FontManager.SmallFont, rect, fg,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+
+        private void DrawToolbarChip(Graphics g, Rectangle rect, string key, string label, bool active)
+        {
+            bool hov = _hoveredElement == key;
+            bool prs = _pressedElement == key;
+            Color fill = active ? Color.FromArgb(46, 36, 92) : (prs ? Theme.BorderHover : (hov ? Theme.BgCardHover : Theme.BgSurface));
+            Color border = active ? Theme.AccentViolet : (hov ? Theme.BorderHover : Theme.BorderSubtle);
+            Color fg = active ? Color.White : Theme.TextPrimary;
+            QuestGridControl.DrawPill(g, rect, fill, border, label, fg, FontManager.BadgeFont, 8);
+        }
+
+        private void DrawToolbarChipWithIcon(Graphics g, Rectangle rect, string key, Image icon, string label, bool active)
+        {
+            bool hov = _hoveredElement == key;
+            bool prs = _pressedElement == key;
+            Color fill = active ? Color.FromArgb(46, 36, 92) : (prs ? Theme.BorderHover : (hov ? Theme.BgCardHover : Theme.BgSurface));
+            Color border = active ? Theme.AccentViolet : (hov ? Theme.BorderHover : Theme.BorderSubtle);
+            Color fg = active ? Color.White : Theme.TextPrimary;
+            QuestGridControl.DrawPillWithIcon(g, rect, fill, border, icon, label, fg, FontManager.BadgeFont, 8);
+        }
+
+        private void DrawCategoryStrip(Graphics g)
+        {
+            string[] keys = new string[] { "active", "desktop", "ending", "orbs", "collectibles", "expired", "done", "all" };
+            string[] prefixes = new string[] { "Active ", "Desktop ", "Ending ", "Orbs ", "Collectibles ", "Expired ", "Done ", "All " };
+
+            _categoryPills.Clear();
+            int x = 18;
+            int y = TitleBarHeight + 4;
+            for (int i = 0; i < keys.Length; i++)
+            {
+                string label = prefixes[i] + _catCounts[i];
+                int w = Math.Max(56, TextRenderer.MeasureText(label, FontManager.BadgeFont).Width + 18);
+                if (x + w > this.ClientSize.Width - 18) break;
+                Rectangle rect = new Rectangle(x, y, w, 28);
+                bool selected = string.Equals(_activeCategory, keys[i], StringComparison.OrdinalIgnoreCase);
+                bool hovered = _hoveredElement == ("cat:" + keys[i]);
+                Color fill = selected ? Theme.AccentViolet : (hovered ? Theme.BgCardHover : Theme.BgSurface);
+                Color border = selected ? Theme.AccentViolet : (hovered ? Theme.BorderHover : Theme.BorderSubtle);
+                Color fg = selected ? Color.White : (keys[i] == "desktop" ? Theme.StatusGreen : Theme.TextMuted);
+                QuestGridControl.DrawPill(g, rect, fill, border, label, fg, FontManager.BadgeFont, 8);
+                _categoryPills.Add(new PillRegion { Key = keys[i], Label = label, Rect = rect });
+                x += w + 6;
+            }
+        }
+
+        private static string FormatUpdatedAgo(DateTime utc)
+        {
+            if (utc == DateTime.MinValue) return "not synced";
+            TimeSpan span = DateTime.UtcNow - utc;
+            if (span.TotalMinutes < 1) return "just now";
+            if (span.TotalHours < 1) return ((int)Math.Floor(span.TotalMinutes)) + "m ago";
+            if (span.TotalDays < 1) return ((int)Math.Floor(span.TotalHours)) + "h ago";
+            return ((int)Math.Floor(span.TotalDays)) + "d ago";
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                QuestDatabase.Instance.OnQuestsUpdated -= HandleDatabaseChanged;
+                QuestDatabase.Instance.OnStateChanged -= HandleDatabaseChanged;
+                QuestDatabase.Instance.OnProgressUpdated -= HandleProgressUpdated;
+                if (_debounceSearch != null) { _debounceSearch.Stop(); _debounceSearch.Dispose(); _debounceSearch = null; }
+                if (_regionMenu != null) { _regionMenu.Dispose(); _regionMenu = null; }
+                if (_sortMenu != null) { _sortMenu.Dispose(); _sortMenu = null; }
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>
+    /// Standalone frameless window wrapper hosting a QuestsPanel.
+    /// </summary>
+    public class QuestsForm : Form
+    {
+        public const int ResizeGrip = 8;
+
+        private readonly QuestsPanel _panel;
+
+        public event Action<GameItem> SimulateRequested;
+        public event Action<GameItem> StopSimulateRequested;
+        public event Action<GameItem> QueueRequested;
+
+        public QuestsForm()
+        {
+            this.ClientSize = new Size(920, 640);
+            this.MinimumSize = new Size(720, 520);
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.BackColor = Theme.BgBase;
+            this.ForeColor = Theme.TextPrimary;
+            this.DoubleBuffered = true;
+            this.Text = "Discord Quests";
+            this.KeyPreview = true;
+
+            _panel = new QuestsPanel();
+            _panel.Dock = DockStyle.Fill;
+            _panel.ShowOuterBorder = true;
+            _panel.SimulateRequested += g => { if (SimulateRequested != null) SimulateRequested(g); };
+            _panel.StopSimulateRequested += g => { if (StopSimulateRequested != null) StopSimulateRequested(g); };
+            _panel.QueueRequested += g => { if (QueueRequested != null) QueueRequested(g); };
+            _panel.CloseRequested += () => this.Close();
+            _panel.MinimizeRequested += () => { this.WindowState = FormWindowState.Minimized; };
+            _panel.MaximizeToggleRequested += ToggleMaximize;
+            _panel.DragRequested += () => Program.DragWindow(this.Handle);
+            this.Controls.Add(_panel);
+        }
+
+        public void SetFiltersForTesting(string category, string query, bool regionOnly, bool hideCompleted, string sortMode)
+        {
+            _panel.SetFiltersForTesting(category, query, regionOnly, hideCompleted, sortMode);
+        }
+
+        public void OpenDetailForTesting(QuestItem quest)
+        {
+            _panel.OpenDetailForTesting(quest);
+        }
+
+        private void ToggleMaximize()
+        {
+            this.WindowState = (this.WindowState == FormWindowState.Maximized)
+                ? FormWindowState.Normal
+                : FormWindowState.Maximized;
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (this.IsHandleCreated && !Program.TryEnableDwmRounding(this.Handle))
+            {
+                if (this.WindowState == FormWindowState.Maximized) this.Region = null;
+                else
+                {
+                    using (GraphicsPath path = Program.GetRoundedPath(new Rectangle(Point.Empty, this.ClientSize), 16))
+                        this.Region = new Region(path);
+                }
+            }
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Escape)
+            {
+                if (_panel != null && _panel.HandleEscape()) e.Handled = true;
+                else { this.Close(); e.Handled = true; }
+            }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.Style &= ~0x00C00000; // WS_CAPTION
+                cp.Style &= ~0x00040000; // WS_THICKFRAME
+                cp.Style |= 0x00020000; // WS_MINIMIZEBOX
+                cp.Style |= 0x00010000; // WS_MAXIMIZEBOX
+                cp.Style |= 0x00080000; // WS_SYSMENU
+                cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Program.EnableImmersiveDarkMode(this.Handle);
+            if (!Program.TryEnableDwmRounding(this.Handle))
+            {
+                using (GraphicsPath path = Program.GetRoundedPath(new Rectangle(Point.Empty, this.ClientSize), 16))
+                    this.Region = new Region(path);
+            }
+        }
+
+        public static bool TryForwardResizeHitTest(Control child, ref Message m)
+        {
+            const int WM_NCHITTEST = 0x0084;
+            if (m.Msg != WM_NCHITTEST || child == null) return false;
+            Form parent = child.FindForm();
+            if (parent == null || parent.WindowState != FormWindowState.Normal || parent.MaximumSize == parent.MinimumSize && parent.MaximumSize != Size.Empty)
+                return false;
+            Point screenPt = new Point(unchecked((short)(m.LParam.ToInt64() & 0xFFFF)),
+                unchecked((short)((m.LParam.ToInt64() >> 16) & 0xFFFF)));
+            Point pt = parent.PointToClient(screenPt);
+            if (pt.X < ResizeGrip || pt.X >= parent.ClientSize.Width - ResizeGrip ||
+                pt.Y < ResizeGrip || pt.Y >= parent.ClientSize.Height - ResizeGrip)
+            {
+                m.Result = (IntPtr)(-1); // HTTRANSPARENT: let parent Form handle edge/corner resize
+                return true;
+            }
+            return false;
+        }
+
+        public static bool HandleFormResizeHitTest(Form form, ref Message m)
+        {
+            const int WM_NCHITTEST = 0x0084;
+            if (m.Msg != WM_NCHITTEST || form == null || form.WindowState != FormWindowState.Normal) return false;
+            Point pt = form.PointToClient(new Point(unchecked((short)(m.LParam.ToInt64() & 0xFFFF)),
+                unchecked((short)((m.LParam.ToInt64() >> 16) & 0xFFFF))));
+            bool left = pt.X < ResizeGrip;
+            bool right = pt.X >= form.ClientSize.Width - ResizeGrip;
+            bool top = pt.Y < ResizeGrip;
+            bool bottom = pt.Y >= form.ClientSize.Height - ResizeGrip;
+            if (top && left) { m.Result = (IntPtr)13; return true; }
+            if (top && right) { m.Result = (IntPtr)14; return true; }
+            if (bottom && left) { m.Result = (IntPtr)16; return true; }
+            if (bottom && right) { m.Result = (IntPtr)17; return true; }
+            if (left) { m.Result = (IntPtr)10; return true; }
+            if (right) { m.Result = (IntPtr)11; return true; }
+            if (top) { m.Result = (IntPtr)12; return true; }
+            if (bottom) { m.Result = (IntPtr)15; return true; }
+            return false;
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (HandleFormResizeHitTest(this, ref m)) return;
+            base.WndProc(ref m);
+        }
+    }
+
+    #endregion
+
     #region Main Form
 
     public class MainForm : Form, IMessageFilter
@@ -4044,10 +7723,16 @@ namespace DiscordQuestLauncher
         private bool _isHoveringClose = false;
         private bool _isHoveringMinimize = false;
         private bool _isHoveringAddBtn = false;
+        private bool _isHoveringQuestsBtn = false;
+        private int _activeQuestCount = -1;
+        private QuestsPanel questsPanel;
+        private bool isQuestsDocked = false;
+        private Size lastExpandedSize = new Size(1340, 640);
 
         private readonly Rectangle CloseRect = new Rectangle(390, 12, 18, 18);
         private readonly Rectangle MinimizeRect = new Rectangle(364, 12, 18, 18);
         private readonly Rectangle AddBtnRect = new Rectangle(376, 440, 22, 22);
+        private readonly Rectangle QuestsBtnRect = new Rectangle(14, 10, 92, 24);
 
         private Process dummyProcess;
         private string dummyExePath;
@@ -4096,6 +7781,7 @@ namespace DiscordQuestLauncher
             GameDatabase.Instance.OnDatabaseUpdated += OnDatabaseLoaded;
             GameDatabase.Instance.OnQualifiedGamesChanged += OnQualifiedGamesUpdated;
             GameDatabase.Instance.OnInitializationCompleted += OnDatabaseLoaded;
+            QuestDatabase.Instance.OnQuestsUpdated += OnQuestsCatalogUpdated;
 
             InitializeWindow();
 
@@ -5137,6 +8823,18 @@ namespace DiscordQuestLauncher
             Invalidate();
         }
 
+        private int ResolvePlannedPlaySeconds(GameItem game)
+        {
+            int fallback = queueRandom.Next(15 * 60, 25 * 60 + 1);
+            int questTarget = QuestDatabase.Instance.GetActiveDesktopQuestTargetSeconds(game, DateTimeOffset.UtcNow);
+            if (questTarget > 0)
+            {
+                int withBuffer = questTarget + queueRandom.Next(60, 151);
+                return Math.Max(fallback, withBuffer);
+            }
+            return fallback;
+        }
+
         private void AddGameToQueue(GameItem rawGame)
         {
             if (rawGame == null || rawGame.id == "__ADD_CUSTOM__") return;
@@ -5146,7 +8844,7 @@ namespace DiscordQuestLauncher
             {
                 QueueItem currentItem = new QueueItem();
                 currentItem.Game = activeSimulatingGame;
-                currentItem.PlannedPlaySeconds = queueRandom.Next(15 * 60, 25 * 60 + 1);
+                currentItem.PlannedPlaySeconds = ResolvePlannedPlaySeconds(activeSimulatingGame);
                 currentItem.PlannedBreakAfterSeconds = queueRandom.Next(10 * 60, 25 * 60 + 1);
                 currentItem.State = QueueItemState.Running;
                 currentItem.ActualPlayedSeconds = 0;
@@ -5175,7 +8873,7 @@ namespace DiscordQuestLauncher
 
             QueueItem item = new QueueItem();
             item.Game = resolved;
-            item.PlannedPlaySeconds = queueRandom.Next(15 * 60, 25 * 60 + 1);
+            item.PlannedPlaySeconds = ResolvePlannedPlaySeconds(resolved);
             item.PlannedBreakAfterSeconds = queueRandom.Next(10 * 60, 25 * 60 + 1);
             item.State = QueueItemState.Pending;
             item.ActualPlayedSeconds = 0;
@@ -5474,6 +9172,7 @@ namespace DiscordQuestLauncher
                         RefreshQueueStrip();
                         UpdateTrayContextMenu();
                         SyncDummyWindow();
+                        SyncActiveQuestsProgress(0);
                     }));
                 }
                 catch
@@ -5527,8 +9226,27 @@ namespace DiscordQuestLauncher
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
+            if (isQuestsDocked && questsPanel != null && !questsPanel.IsDisposed)
+            {
+                questsPanel.Bounds = new Rectangle(421, 1, Math.Max(200, this.ClientSize.Width - 422), Math.Max(100, this.ClientSize.Height - 2));
+            }
+            UpdateWindowRegion();
             SyncDummyWindow();
             if (WindowState != FormWindowState.Minimized) Invalidate(true);
+        }
+
+        private void UpdateWindowRegion()
+        {
+            if (!this.IsHandleCreated) return;
+            if (!Program.TryEnableDwmRounding(this.Handle))
+            {
+                if (this.WindowState == FormWindowState.Maximized) this.Region = null;
+                else
+                {
+                    using (GraphicsPath path = Program.GetRoundedPath(new Rectangle(Point.Empty, this.ClientSize), 16))
+                        this.Region = new Region(path);
+                }
+            }
         }
 
         protected override void OnVisibleChanged(EventArgs e)
@@ -5605,6 +9323,7 @@ namespace DiscordQuestLauncher
             RefreshQueueStrip();
             UpdateTrayContextMenu();
             RefreshSwitcherList();
+            SyncActiveQuestsProgress(0);
         }
 
         private void StopAllSimulations()
@@ -5652,6 +9371,19 @@ namespace DiscordQuestLauncher
             RefreshQueueStrip();
             RefreshDiscordStatus();
             UpdateTrayContextMenu();
+            SyncActiveQuestsProgress(0);
+        }
+
+        private void SyncActiveQuestsProgress(int deltaSeconds)
+        {
+            List<GameItem> activeGames = new List<GameItem>();
+            if (activeSimulatingGame != null) activeGames.Add(activeSimulatingGame);
+            for (int i = 0; i < extraInstances.Count; i++)
+            {
+                if (extraInstances[i] != null && extraInstances[i].Game != null)
+                    activeGames.Add(extraInstances[i].Game);
+            }
+            QuestDatabase.Instance.UpdateActiveSimulationProgress(activeGames, deltaSeconds, DateTimeOffset.UtcNow);
         }
 
         private void StopSimulation()
@@ -5672,6 +9404,7 @@ namespace DiscordQuestLauncher
             StopDiscordRpc();
             KillDummy();
             if (sessionStopwatch != null) sessionStopwatch.Stop();
+            QuestDatabase.Instance.ClearActiveSimulation();
             bool recorded = TryRecordSession();
             if (!recorded)
                 MessageBox.Show("Could not save this session. It will be retried before the next launch or exit; see launcher.log for details.", "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -6178,12 +9911,15 @@ namespace DiscordQuestLauncher
             if (sessionStopwatch != null) sessionStopwatch.Stop();
             if (queueBreakStopwatch != null) queueBreakStopwatch.Stop();
             isQueueRunning = false;
+            QuestDatabase.Instance.ClearActiveSimulation();
             StopDiscordRpc();
             KillDummy();
             KillAllExtraDummies();
             GameDatabase.Instance.OnDatabaseUpdated -= OnDatabaseLoaded;
             GameDatabase.Instance.OnQualifiedGamesChanged -= OnQualifiedGamesUpdated;
             GameDatabase.Instance.OnInitializationCompleted -= OnDatabaseLoaded;
+            QuestDatabase.Instance.OnQuestsUpdated -= OnQuestsCatalogUpdated;
+            if (questsPanel != null && !questsPanel.IsDisposed) { questsPanel.Dispose(); questsPanel = null; }
 
             if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); }
             if (timerQualification != null) { timerQualification.Stop(); timerQualification.Dispose(); }
@@ -6213,6 +9949,8 @@ namespace DiscordQuestLauncher
                 GameDatabase.Instance.OnDatabaseUpdated -= OnDatabaseLoaded;
                 GameDatabase.Instance.OnQualifiedGamesChanged -= OnQualifiedGamesUpdated;
                 GameDatabase.Instance.OnInitializationCompleted -= OnDatabaseLoaded;
+                QuestDatabase.Instance.OnQuestsUpdated -= OnQuestsCatalogUpdated;
+                if (questsPanel != null && !questsPanel.IsDisposed) { questsPanel.Dispose(); questsPanel = null; }
                 if (globalToolTip != null) globalToolTip.Dispose();
                 if (trayIcon != null && trayIcon.ContextMenuStrip != null) trayIcon.ContextMenuStrip.Dispose();
             }
@@ -6243,6 +9981,138 @@ namespace DiscordQuestLauncher
             }
         }
 
+        private void OnQuestsCatalogUpdated()
+        {
+            int active = QuestDatabase.Instance.GetActiveCount(DateTimeOffset.UtcNow);
+            if (this.IsHandleCreated && !this.IsDisposed)
+            {
+                try
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        _activeQuestCount = active;
+                        Invalidate(QuestsBtnRect);
+                    }));
+                }
+                catch { }
+            }
+        }
+
+        private void ToggleMainMaximize()
+        {
+            if (!isQuestsDocked) return;
+            this.WindowState = (this.WindowState == FormWindowState.Maximized)
+                ? FormWindowState.Normal
+                : FormWindowState.Maximized;
+        }
+
+        protected virtual void OpenQuestsWindow()
+        {
+            if (isQuestsDocked)
+            {
+                if (this.WindowState == FormWindowState.Maximized)
+                    this.WindowState = FormWindowState.Normal;
+                if (this.ClientSize.Width > 420)
+                    lastExpandedSize = this.ClientSize;
+                isQuestsDocked = false;
+                if (questsPanel != null) questsPanel.Visible = false;
+                this.MinimumSize = new Size(420, 480);
+                this.MaximumSize = new Size(420, 480);
+                this.ClientSize = new Size(420, 480);
+                UpdateWindowRegion();
+                Invalidate(true);
+                return;
+            }
+
+            QuestDatabase.Instance.Initialize();
+            if (questsPanel == null || questsPanel.IsDisposed)
+            {
+                questsPanel = new QuestsPanel();
+                questsPanel.ShowOuterBorder = false;
+                questsPanel.SimulateRequested += OnQuestSimulateRequested;
+                questsPanel.StopSimulateRequested += OnQuestStopRequested;
+                questsPanel.QueueRequested += OnQuestQueueRequested;
+                questsPanel.DragRequested += () => Program.DragWindow(this.Handle);
+                questsPanel.MinimizeRequested += () => { this.WindowState = FormWindowState.Minimized; };
+                questsPanel.MaximizeToggleRequested += ToggleMainMaximize;
+                questsPanel.CloseRequested += () => { if (isQuestsDocked) OpenQuestsWindow(); };
+                this.Controls.Add(questsPanel);
+            }
+
+            Rectangle work = Screen.FromControl(this).WorkingArea;
+            int minW = Math.Min(1140, Math.Max(720, work.Width - 16));
+            int targetW = Math.Min(work.Width - 16, Math.Max(minW, lastExpandedSize.Width));
+            int targetH = Math.Min(work.Height - 16, Math.Max(540, lastExpandedSize.Height));
+
+            isQuestsDocked = true;
+            this.MaximumSize = Size.Empty;
+            this.MinimumSize = new Size(minW, Math.Min(520, work.Height - 16));
+            this.ClientSize = new Size(targetW, targetH);
+
+            int nx = this.Location.X;
+            int ny = this.Location.Y;
+            if (nx + this.Width > work.Right) nx = Math.Max(work.Left, work.Right - this.Width);
+            if (ny + this.Height > work.Bottom) ny = Math.Max(work.Top, work.Bottom - this.Height);
+            if (nx < work.Left) nx = work.Left;
+            if (ny < work.Top) ny = work.Top;
+            if (nx != this.Location.X || ny != this.Location.Y)
+                this.Location = new Point(nx, ny);
+
+            questsPanel.Bounds = new Rectangle(421, 1, Math.Max(200, this.ClientSize.Width - 422), Math.Max(100, this.ClientSize.Height - 2));
+            questsPanel.Visible = true;
+            questsPanel.BringToFront();
+            questsPanel.RefreshView(false);
+            UpdateWindowRegion();
+            Invalidate(true);
+        }
+
+        private void OnQuestSimulateRequested(GameItem game)
+        {
+            if (game == null) return;
+            GameItem resolved = GameDatabase.Instance.ResolveGameMetadata(game) ?? game;
+            if (isSimulatingMode || isLaunching)
+            {
+                AddGameToQueue(resolved);
+                RestoreFromTray();
+                return;
+            }
+            SelectGame(resolved);
+            RestoreFromTray();
+            LaunchSimulation(resolved.exe);
+        }
+
+        private void OnQuestQueueRequested(GameItem game)
+        {
+            if (game == null) return;
+            GameItem resolved = GameDatabase.Instance.ResolveGameMetadata(game) ?? game;
+            AddGameToQueue(resolved);
+            RestoreFromTray();
+        }
+
+        private void OnQuestStopRequested(GameItem game)
+        {
+            if (game == null) return;
+            GameItem resolved = GameDatabase.Instance.ResolveGameMetadata(game) ?? game;
+            if (isSimulatingMode && activeSimulatingGame != null &&
+                (IsSameGameIdentity(activeSimulatingGame, resolved) ||
+                 (!string.IsNullOrEmpty(resolved.id) && string.Equals(activeSimulatingGame.id, resolved.id, StringComparison.Ordinal))))
+            {
+                StopSimulation();
+                return;
+            }
+            for (int i = 0; i < extraInstances.Count; i++)
+            {
+                ExtraGameInstance inst = extraInstances[i];
+                if (inst != null && inst.Game != null &&
+                    (IsSameGameIdentity(inst.Game, resolved) ||
+                     (!string.IsNullOrEmpty(resolved.id) && string.Equals(inst.Game.id, resolved.id, StringComparison.Ordinal))))
+                {
+                    StopExtraSimulation(inst, true);
+                    return;
+                }
+            }
+        }
+
         protected override CreateParams CreateParams
         {
             get
@@ -6255,10 +10125,24 @@ namespace DiscordQuestLauncher
                 // With WS_CAPTION stripped, neither paints anything; they only re-enable the shell behaviour
                 // (taskbar click-to-minimize, Win+Down, Alt+Space menu) that ControlBox/MinimizeBox=false removed.
                 cp.Style |= 0x00020000; // WS_MINIMIZEBOX
+                cp.Style |= 0x00010000; // WS_MAXIMIZEBOX
                 cp.Style |= 0x00080000; // WS_SYSMENU
                 cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
                 return cp;
             }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (isQuestsDocked && QuestsForm.HandleFormResizeHitTest(this, ref m)) return;
+            base.WndProc(ref m);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape && isQuestsDocked && questsPanel != null && questsPanel.Visible && questsPanel.HandleEscape())
+                return true;
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -6283,6 +10167,7 @@ namespace DiscordQuestLauncher
             Program.SetWindowText(this.Handle, title);
 
             if (GameDatabase.Instance.Count > 0) RefreshSwitcherList();
+            if (!isSimulatingMode) QuestDatabase.Instance.Initialize();
 
             this.BeginInvoke(new Action(TryLaunchStartupGame));
         }
@@ -6321,20 +10206,23 @@ namespace DiscordQuestLauncher
                 Invalidate();
             }
 
-            bool hClose = CloseRect.Contains(e.Location);
-            bool hMin = MinimizeRect.Contains(e.Location);
+            bool hClose = !isQuestsDocked && CloseRect.Contains(e.Location);
+            bool hMin = !isQuestsDocked && MinimizeRect.Contains(e.Location);
             bool hAdd = AddBtnRect.Contains(e.Location);
+            bool hQuests = QuestsBtnRect.Contains(e.Location);
 
-            if (hClose != _isHoveringClose || hMin != _isHoveringMinimize || hAdd != _isHoveringAddBtn)
+            if (hClose != _isHoveringClose || hMin != _isHoveringMinimize || hAdd != _isHoveringAddBtn || hQuests != _isHoveringQuestsBtn)
             {
                 _isHoveringClose = hClose;
                 _isHoveringMinimize = hMin;
                 _isHoveringAddBtn = hAdd;
+                _isHoveringQuestsBtn = hQuests;
 
-                if (hClose || hMin || hAdd)
+                if (hClose || hMin || hAdd || hQuests)
                 {
                     this.Cursor = Cursors.Hand;
                     if (hAdd && globalToolTip != null) globalToolTip.SetToolTip(this, "Add Game");
+                    else if (hQuests && globalToolTip != null) globalToolTip.SetToolTip(this, "Browse Discord Quests");
                     else if (globalToolTip != null) globalToolTip.SetToolTip(this, "");
                 }
                 else
@@ -6356,6 +10244,7 @@ namespace DiscordQuestLauncher
                 _isHoveringClose = false;
                 _isHoveringMinimize = false;
                 _isHoveringAddBtn = false;
+                _isHoveringQuestsBtn = false;
                 this.Cursor = Cursors.Default;
                 Invalidate();
             }
@@ -6366,20 +10255,26 @@ namespace DiscordQuestLauncher
             base.OnMouseDown(e);
             if (e.Button == MouseButtons.Left)
             {
-                // Top-right window controls (visible on window hover)
-                if (CloseRect.Contains(e.Location))
+                // Top-right window controls (visible on window hover in compact mode)
+                if (!isQuestsDocked && CloseRect.Contains(e.Location))
                 {
                     MinimizeToTray();
                     return;
                 }
 
-                if (MinimizeRect.Contains(e.Location))
+                if (!isQuestsDocked && MinimizeRect.Contains(e.Location))
                 {
                     this.WindowState = FormWindowState.Minimized;
                     return;
                 }
 
-                // Footer Button
+                // Footer Buttons
+                if (QuestsBtnRect.Contains(e.Location))
+                {
+                    OpenQuestsWindow();
+                    return;
+                }
+
                 if (AddBtnRect.Contains(e.Location))
                 {
                     ShowAddCustomGameDialog("");
@@ -6398,16 +10293,27 @@ namespace DiscordQuestLauncher
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
             // Subtle 1px window border inside the 16px rounded radius
-            using (GraphicsPath path = Program.GetRoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), Program.WindowRadius))
+            if (this.WindowState != FormWindowState.Maximized)
             {
-                using (Pen borderPen = new Pen(Theme.BorderSubtle, 1f))
+                using (GraphicsPath path = Program.GetRoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), Program.WindowRadius))
                 {
-                    g.DrawPath(borderPen, path);
+                    using (Pen borderPen = new Pen(Theme.BorderSubtle, 1f))
+                    {
+                        g.DrawPath(borderPen, path);
+                    }
                 }
             }
 
-            // Top-right window controls: Close and minimize appear as two tiny icons, ONLY visible on window hover
-            if (_isMouseInWindow)
+            if (isQuestsDocked)
+            {
+                using (Pen sep = new Pen(Theme.BorderSubtle, 1f))
+                {
+                    g.DrawLine(sep, 420, 1, 420, Height - 2);
+                }
+            }
+
+            // Top-right window controls: Close and minimize appear as two tiny icons, ONLY visible on window hover in compact mode
+            if (_isMouseInWindow && !isQuestsDocked)
             {
                 // Minimize (-)
                 Color minColor = _isHoveringMinimize ? Theme.TextPrimary : Theme.TextMuted;
@@ -6424,6 +10330,13 @@ namespace DiscordQuestLauncher
                     g.DrawLine(closePen, CloseRect.X + 14, CloseRect.Y + 4, CloseRect.X + 4, CloseRect.Y + 14);
                 }
             }
+
+            // Top-left header button: Quests Explorer
+            string qLabel = _activeQuestCount > 0 ? ("Quests \u00B7 " + _activeQuestCount) : "Quests";
+            Color qFill = isQuestsDocked ? Color.FromArgb(46, 36, 92) : (_isHoveringQuestsBtn ? Theme.BgCardHover : Theme.BgSurface);
+            Color qBorder = (isQuestsDocked || _isHoveringQuestsBtn) ? Theme.AccentViolet : Theme.BorderSubtle;
+            Color qText = (isQuestsDocked || _isHoveringQuestsBtn) ? Theme.TextPrimary : Theme.TextMuted;
+            QuestGridControl.DrawPill(g, QuestsBtnRect, qFill, qBorder, qLabel, qText, FontManager.BadgeFont, 8);
 
             // Footer button: Add custom game (+)
             Color addColor = _isHoveringAddBtn ? Theme.TextPrimary : Theme.TextMuted;
