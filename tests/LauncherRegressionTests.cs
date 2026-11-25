@@ -60,6 +60,8 @@ public static class LauncherRegressionTests
             HelperLifecycle();
             IconLoadingAndControlLifetime();
             WindowLifecycle();
+            TestMultiInstanceSimulation();
+            TestQueueSimulation();
             SearchDropdownLayout();
             SearchLightDismiss();
             Console.WriteLine("PASS: " + checks + " application regression assertions");
@@ -102,10 +104,11 @@ public static class LauncherRegressionTests
     {
         Call(form, "StopDiscordRpc");
         Call(form, "KillDummy");
+        Call(form, "KillAllExtraDummies");
         Database.OnDatabaseUpdated -= (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(MainForm).GetMethod("OnDatabaseLoaded", Private));
         Database.OnInitializationCompleted -= (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(MainForm).GetMethod("OnDatabaseLoaded", Private));
         Database.OnQualifiedGamesChanged -= (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(MainForm).GetMethod("OnQualifiedGamesUpdated", Private));
-        foreach (string timer in new string[] { "timerQualification", "timerUIUpdate", "timerHoverCheck", "debounceSearchTimer" })
+        foreach (string timer in new string[] { "timerQualification", "timerUIUpdate", "timerHoverCheck", "debounceSearchTimer", "debounceExtraSearchTimer" })
             ((System.Windows.Forms.Timer)MainField(form, timer)).Dispose();
         ((NotifyIcon)MainField(form, "trayIcon")).Dispose();
         form.Dispose();
@@ -611,16 +614,199 @@ public static class LauncherRegressionTests
                 Check(!Program.IsWindowVisible(helper), mode + ": late startup cannot leave a blank window behind");
                 form.RestoreFromTray();
                 Check(Program.IsWindowVisible(helper), mode + ": late helper restores normally");
-                using (Bitmap screenshot = new Bitmap(360, 480))
+                using (Bitmap screenshot = new Bitmap(420, 480))
                 {
-                    form.DrawToBitmap(screenshot, new Rectangle(0, 0, 360, 480));
-                    Check(screenshot.GetPixel(180, 355).ToArgb() != Theme.BgBase.ToArgb(),
+                    form.DrawToBitmap(screenshot, new Rectangle(0, 0, 420, 480));
+                    Check(screenshot.GetPixel(210, 355).ToArgb() != Theme.BgBase.ToArgb(),
                         mode + ": launcher controls still paint after repeated restores");
                 }
                 Call(form, "StopSimulation");
             }
             finally { DisposeForm(form); }
         }
+    }
+
+    private static void TestMultiInstanceSimulation()
+    {
+        File.WriteAllText(Path.Combine(root, "launch_mode.txt"), "behind");
+        GameItem alpha = Game("", "Multi Alpha", "multi-alpha.exe");
+        GameItem beta = Game("", "Multi Beta", "multi-beta.exe");
+        Database.SaveLastSimulatedGame(alpha);
+        MainForm form = new MainForm(new string[] { "--launcher" });
+        try
+        {
+            form.Show();
+            Application.DoEvents();
+            Control strip = (Control)MainField(form, "extraStripControl");
+            Check(!strip.Visible, "multi-instance strip is hidden when idle");
+
+            Call(form, "SelectGame", alpha);
+            Call(form, "LaunchSimulation", alpha.exe);
+            WaitUntil(() => MainField(form, "dummyProcess") != null && (IntPtr)MainField(form, "dummyHwnd") != IntPtr.Zero,
+                8000, "multi-instance: primary helper starts");
+            Check(strip.Visible, "multi-instance strip is visible when simulating");
+
+            Process primaryProc = (Process)MainField(form, "dummyProcess");
+            int primaryPid = primaryProc.Id;
+            IntPtr primaryHwnd = (IntPtr)MainField(form, "dummyHwnd");
+            string primaryPath = (string)MainField(form, "dummyExePath");
+
+            List<ExtraGameInstance> extras = (List<ExtraGameInstance>)MainField(form, "extraInstances");
+            QueueStripControl queueStrip = (QueueStripControl)MainField(form, "queueStripControl");
+            Call(form, "LaunchExtraSimulation", beta);
+            WaitUntil(() => extras.Count == 1 && extras[0].DummyProcess != null && extras[0].DummyHwnd != IntPtr.Zero,
+                8000, "multi-instance: extra helper starts and its window is discovered");
+            Check(queueStrip.Visible, "concurrent running games show horizontal chain in queueStripControl");
+            using (Bitmap cbmp = new Bitmap(queueStrip.Width, queueStrip.Height))
+                queueStrip.DrawToBitmap(cbmp, new Rectangle(0, 0, queueStrip.Width, queueStrip.Height));
+
+            ExtraGameInstance extra = extras[0];
+            Process extraProc = extra.DummyProcess;
+            int extraPid = extraProc.Id;
+            IntPtr extraHwnd = extra.DummyHwnd;
+            Check(!primaryProc.HasExited && !extraProc.HasExited, "both primary and extra helper processes stay alive simultaneously");
+            Check(!string.Equals(Path.GetDirectoryName(primaryPath), Path.GetDirectoryName(extra.DummyExePath), StringComparison.OrdinalIgnoreCase),
+                "each helper runs from its own temp session directory");
+
+            // Duplicate launches of already-running games must be ignored.
+            Call(form, "LaunchExtraSimulation", alpha);
+            Call(form, "LaunchExtraSimulation", beta);
+            Application.DoEvents();
+            Check(extras.Count == 1, "duplicate running games cannot be launched twice");
+
+            form.MinimizeToTray();
+            Application.DoEvents();
+            Check(!form.Visible && !Program.IsWindowVisible(primaryHwnd) && !Program.IsWindowVisible(extraHwnd),
+                "tray minimize hides launcher and all running helper windows");
+            form.RestoreFromTray();
+            Application.DoEvents();
+            Check(form.Visible && Program.IsWindowVisible(primaryHwnd) && Program.IsWindowVisible(extraHwnd),
+                "tray restore restores launcher and all running helper windows");
+
+            // Stopping primary promotes the extra instance without killing the extra helper.
+            Call(form, "StopSimulation");
+            WaitUntil(() => HasProcessExited(primaryPid), 3000, "stopping primary terminates the primary helper");
+            Check(!HasProcessExited(extraPid) && extras.Count == 0, "stopping primary promotes extra instance and keeps its helper alive");
+            Check(((GameItem)MainField(form, "activeSimulatingGame")).exe == beta.exe &&
+                  object.ReferenceEquals(MainField(form, "dummyProcess"), extraProc),
+                "promoted game becomes the active primary simulation");
+
+            // Stopping the promoted instance returns to idle.
+            Call(form, "StopSimulation");
+            WaitUntil(() => HasProcessExited(extraPid), 3000, "stopping promoted game terminates its helper");
+            Check(!strip.Visible && !(bool)MainField(form, "isSimulatingMode"), "stopping final game hides strip and returns to idle");
+        }
+        finally { DisposeForm(form); }
+    }
+
+    private static bool HasProcessExited(int pid)
+    {
+        try
+        {
+            using (Process p = Process.GetProcessById(pid)) return p.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
+    }
+
+    private static void TestQueueSimulation()
+    {
+        File.WriteAllText(Path.Combine(root, "launch_mode.txt"), "behind");
+        GameItem q1 = Game("", "Queue One", "queue-one.exe");
+        GameItem q2 = Game("", "Queue Two", "queue-two.exe");
+        Database.SaveLastSimulatedGame(q1);
+        MainForm form = new MainForm(new string[] { "--launcher" });
+        try
+        {
+            form.Show();
+            Application.DoEvents();
+            QueueStripControl strip = (QueueStripControl)MainField(form, "queueStripControl");
+            Control extraStrip = (Control)MainField(form, "extraStripControl");
+            Control hero = (Control)MainField(form, "heroControl");
+            Control switcher = (Control)MainField(form, "switcherControl");
+            List<QueueItem> queue = (List<QueueItem>)MainField(form, "queueItems");
+
+            Check(!strip.Visible && hero.Visible && switcher.Visible, "queue strip is hidden initially while hero and switcher are visible");
+            Call(form, "AddGameToQueue", q1);
+            Call(form, "AddGameToQueue", q2);
+            Call(form, "AddGameToQueue", q1); // duplicate ignored
+            Check(queue.Count == 2 && strip.Visible && hero.Visible && switcher.Visible,
+                "queue accepts unique games, shows horizontal queue strip, and keeps hero/switcher visible");
+            Check(queue[0].PlannedPlaySeconds >= 900 && queue[0].PlannedPlaySeconds <= 1500,
+                "queued game play duration is randomized between 15 and 25 minutes");
+            Check(queue[0].PlannedBreakAfterSeconds >= 600 && queue[0].PlannedBreakAfterSeconds <= 1500,
+                "queued inter-game break timer is randomized between 10 and 25 minutes");
+
+            Call(form, "ToggleQueuePanel");
+            Check(!strip.Visible && hero.Visible && switcher.Visible, "closing queue panel keeps hero and switcher visible");
+            Call(form, "ToggleQueuePanel");
+            Check(strip.Visible && hero.Visible && switcher.Visible, "reopening queue panel keeps hero and switcher visible");
+
+            Call(form, "OnQueueRemoveRequested", 1);
+            Check(queue.Count == 1, "removing pending queued game succeeds");
+            Call(form, "AddGameToQueue", q2);
+            Check(queue.Count == 2, "re-adding second game restores queue");
+
+            // Override durations for fast deterministic end-to-end execution.
+            queue[0].PlannedPlaySeconds = 1;
+            queue[0].PlannedBreakAfterSeconds = 1;
+            queue[1].PlannedPlaySeconds = 1;
+
+            Call(form, "StartQueue");
+            WaitUntil(() => MainField(form, "dummyProcess") != null && (bool)MainField(form, "isSimulatingMode"),
+                8000, "queue: first game helper starts");
+            int firstPid = ((Process)MainField(form, "dummyProcess")).Id;
+            Check(extraStrip.Visible && strip.Visible, "post-launch action row and queue strip are visible while queue runs");
+            using (Bitmap bmp = new Bitmap(strip.Width, strip.Height)) strip.DrawToBitmap(bmp, new Rectangle(0, 0, strip.Width, strip.Height));
+            using (Bitmap ebmp = new Bitmap(extraStrip.Width, extraStrip.Height)) extraStrip.DrawToBitmap(ebmp, new Rectangle(0, 0, extraStrip.Width, extraStrip.Height));
+
+            WaitUntil(() => (QueuePhase)MainField(form, "queuePhase") == QueuePhase.BreakCooldown,
+                6000, "queue: first game completes and enters break cooldown");
+            Check(queue[0].State == QueueItemState.Completed && HasProcessExited(firstPid),
+                "queue: first game is marked Completed and its helper exited");
+            Check(!((bool)MainField(form, "isSimulatingMode")), "queue: no game process runs during break cooldown");
+
+            WaitUntil(() => (QueuePhase)MainField(form, "queuePhase") == QueuePhase.PlayingGame &&
+                            (int)MainField(form, "queueActiveIndex") == 1 &&
+                            MainField(form, "dummyProcess") != null,
+                6000, "queue: break timer finishes and launches second game");
+            int secondPid = ((Process)MainField(form, "dummyProcess")).Id;
+            Check(((GameItem)MainField(form, "activeSimulatingGame")).exe == q2.exe,
+                "queue: second game is now the active simulation");
+
+            WaitUntil(() => !(bool)MainField(form, "isQueueRunning") &&
+                            (QueuePhase)MainField(form, "queuePhase") == QueuePhase.Idle,
+                6000, "queue: second game completes and finishes the queue");
+            Check(queue[1].State == QueueItemState.Completed && HasProcessExited(secondPid),
+                "queue: final game is marked Completed and its helper exited");
+
+            // Verify cancelling during BreakCooldown resets cleanly to idle.
+            queue[0].State = QueueItemState.Pending; queue[0].PlannedPlaySeconds = 1; queue[0].PlannedBreakAfterSeconds = 30;
+            queue[1].State = QueueItemState.Pending; queue[1].PlannedPlaySeconds = 1;
+            Call(form, "StartQueue");
+            WaitUntil(() => (QueuePhase)MainField(form, "queuePhase") == QueuePhase.BreakCooldown,
+                8000, "queue cancel test: reaches break cooldown");
+            Call(form, "StopQueue");
+            Check(!(bool)MainField(form, "isQueueRunning") && (QueuePhase)MainField(form, "queuePhase") == QueuePhase.Idle,
+                "StopQueue during break cooldown returns cleanly to idle");
+
+            // Adding a game to queue while a standalone game is already running auto-includes row 0.
+            queue.Clear();
+            Call(form, "ToggleQueuePanel");
+            Call(form, "SelectGame", q1);
+            Call(form, "LaunchSimulation", q1.exe);
+            WaitUntil(() => MainField(form, "dummyProcess") != null && (bool)MainField(form, "isSimulatingMode"),
+                8000, "auto-queue: standalone game starts");
+            Call(form, "AddGameToQueue", q2);
+            Check(queue.Count == 2 && queue[0].Game.exe == q1.exe && queue[0].State == QueueItemState.Running &&
+                  queue[1].Game.exe == q2.exe && queue[1].State == QueueItemState.Pending &&
+                  (bool)MainField(form, "isQueueRunning") && strip.Visible && hero.Visible && switcher.Visible,
+                "adding to queue while running auto-includes the active game at slot 0 while keeping hero/switcher visible");
+            Call(form, "StopQueue");
+        }
+        finally { DisposeForm(form); }
     }
 
     private static void SearchDropdownLayout()

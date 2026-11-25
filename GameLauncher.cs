@@ -319,7 +319,7 @@ namespace DiscordQuestLauncher
                 if (!(args.Length > 7 && int.TryParse(args[6], out x) && int.TryParse(args[7], out y))) { x = 100; y = 100; }
                 this.ShowInTaskbar = taskbarButton;
                 this.BackColor = Theme.BgBase;
-                this.ClientSize = new Size(360, 480);
+                this.ClientSize = new Size(420, 480);
                 this.Location = new Point(x, y);
             }
             else
@@ -436,6 +436,7 @@ namespace DiscordQuestLauncher
         private static Font _searchFont;
         private static Font _smallFont;
         private static Font _listExeFont;
+        private static Font _queueTinyFont;
 
         public static Font NameFont
         {
@@ -472,6 +473,11 @@ namespace DiscordQuestLauncher
         public static Font ListExeFont
         {
             get { return _listExeFont ?? (_listExeFont = ResolveFont(new string[] { "Geist Mono", "JetBrains Mono", "Cascadia Code", "Consolas" }, 8.5f, FontStyle.Regular)); }
+        }
+
+        public static Font QueueTinyFont
+        {
+            get { return _queueTinyFont ?? (_queueTinyFont = ResolveFont(new string[] { "Geist Mono", "JetBrains Mono", "Cascadia Code", "Consolas" }, 7.25f, FontStyle.Bold)); }
         }
 
         private static Font ResolveFont(string[] familyNames, float size, FontStyle style)
@@ -2343,7 +2349,7 @@ namespace DiscordQuestLauncher
             _isRunning = running;
             int targetWidth = running ? 196 : 148;
             this.Size = new Size(targetWidth, 36);
-            int parentWidth = (this.Parent != null) ? this.Parent.ClientSize.Width : 360;
+            int parentWidth = (this.Parent != null) ? this.Parent.ClientSize.Width : 420;
             this.Location = new Point((parentWidth - targetWidth) / 2, 338);
             Invalidate();
         }
@@ -2586,7 +2592,7 @@ namespace DiscordQuestLauncher
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            this.Size = new Size(360, 180);
+            this.Size = new Size(420, 180);
 
             _crossfadeTimer = new System.Windows.Forms.Timer();
             _crossfadeTimer.Interval = 15;
@@ -2863,7 +2869,7 @@ namespace DiscordQuestLauncher
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            this.Size = new Size(360, 40);
+            this.Size = new Size(420, 40);
             _toolTip = toolTip;
         }
 
@@ -3258,6 +3264,751 @@ namespace DiscordQuestLauncher
 
     #endregion
 
+    public class ExtraGameInstance
+    {
+        public GameItem Game;
+        public Process DummyProcess;
+        public string DummyExePath;
+        public string DummyMode;
+        public IntPtr DummyHwnd;
+        public Stopwatch Stopwatch;
+        public bool QualificationFinalRecorded;
+        public DiscordRpcClient RpcClient;
+        public Thread RpcThread;
+        public ManualResetEvent RpcStop;
+        public readonly object RpcLock = new object();
+    }
+
+    public class MultiInstanceStripControl : Control
+    {
+        public const int MaxExtraInstances = 6;
+        private const int ButtonWidth = 94;
+        private const int ButtonHeight = 26;
+        private const int ButtonGap = 10;
+
+        private bool _canQueue = true;
+        private bool _canLaunchAnother = true;
+        private bool _isLaunchingExtra = false;
+        private int _hoveredButton = -1; // -1 = none, 0 = Queue, 1 = + Launch
+        private ToolTip _toolTip;
+
+        public event EventHandler QueueButtonClicked;
+        public event EventHandler AddInstanceClicked;
+#pragma warning disable 67
+        public event Action<ExtraGameInstance> InstanceStopRequested;
+#pragma warning restore 67
+        public event MouseEventHandler EmptyMouseDown;
+
+        public MultiInstanceStripControl(ToolTip toolTip)
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            this.Size = new Size(420, 32);
+            _toolTip = toolTip;
+        }
+
+        public void SetActionStates(bool canQueue, bool canLaunchAnother, bool launchingExtra)
+        {
+            _canQueue = canQueue;
+            _canLaunchAnother = canLaunchAnother;
+            _isLaunchingExtra = launchingExtra;
+            RefreshTooltip();
+            Invalidate();
+        }
+
+        public void SetInstances(List<ExtraGameInstance> instances, bool launchingExtra)
+        {
+            int count = instances != null ? instances.Count : 0;
+            SetActionStates(_canQueue, count < MaxExtraInstances, launchingExtra);
+        }
+
+        public void RefreshTooltip()
+        {
+            if (_toolTip == null) return;
+            string nextTip = "";
+            if (_hoveredButton == 0 && _canQueue)
+            {
+                nextTip = "Add game to queue";
+            }
+            else if (_hoveredButton == 1 && _canLaunchAnother)
+            {
+                nextTip = _isLaunchingExtra ? "Starting..." : "Run another game at the same time";
+            }
+            if (_toolTip.GetToolTip(this) != nextTip)
+            {
+                _toolTip.SetToolTip(this, nextTip);
+            }
+        }
+
+        private Rectangle GetButtonRect(int index)
+        {
+            int totalWidth = ButtonWidth * 2 + ButtonGap;
+            int startX = (Width - totalWidth) / 2;
+            int y = (Height - ButtonHeight) / 2;
+            return new Rectangle(startX + index * (ButtonWidth + ButtonGap), y, ButtonWidth, ButtonHeight);
+        }
+
+        private bool IsButtonEnabled(int index)
+        {
+            if (index == 0) return _canQueue;
+            if (index == 1) return _canLaunchAnother && !_isLaunchingExtra;
+            return false;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int nextHover = -1;
+            if (GetButtonRect(0).Contains(e.Location)) nextHover = 0;
+            else if (GetButtonRect(1).Contains(e.Location)) nextHover = 1;
+
+            if (nextHover != _hoveredButton)
+            {
+                _hoveredButton = nextHover;
+                this.Cursor = IsButtonEnabled(_hoveredButton) ? Cursors.Hand : Cursors.Default;
+                RefreshTooltip();
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_hoveredButton != -1)
+            {
+                _hoveredButton = -1;
+                this.Cursor = Cursors.Default;
+                RefreshTooltip();
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+
+            if (GetButtonRect(0).Contains(e.Location))
+            {
+                if (_canQueue && QueueButtonClicked != null) QueueButtonClicked(this, EventArgs.Empty);
+                return;
+            }
+            if (GetButtonRect(1).Contains(e.Location))
+            {
+                if (_canLaunchAnother && !_isLaunchingExtra && AddInstanceClicked != null) AddInstanceClicked(this, EventArgs.Empty);
+                return;
+            }
+            if (EmptyMouseDown != null) EmptyMouseDown(this, e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            for (int i = 0; i < 2; i++)
+            {
+                Rectangle r = GetButtonRect(i);
+                bool enabled = IsButtonEnabled(i);
+                bool hovered = enabled && (_hoveredButton == i);
+
+                using (GraphicsPath path = Program.GetRoundedPath(new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), 8))
+                {
+                    using (SolidBrush bg = new SolidBrush(hovered ? Theme.BgCardHover : Theme.BgSurface))
+                    {
+                        g.FillPath(bg, path);
+                    }
+                    using (Pen borderPen = new Pen(hovered ? Theme.AccentViolet : Theme.BorderSubtle, 1f))
+                    {
+                        g.DrawPath(borderPen, path);
+                    }
+                }
+
+                Color fg = !enabled ? Theme.TextDim : (hovered ? Theme.TextPrimary : Theme.TextMuted);
+                if (i == 0)
+                {
+                    using (Pen qPen = new Pen(fg, 1.4f))
+                    {
+                        int qx = r.X + 14;
+                        int qy = r.Y + 7;
+                        g.DrawLine(qPen, qx, qy + 2, qx + 9, qy + 2);
+                        g.DrawLine(qPen, qx, qy + 6, qx + 7, qy + 6);
+                        g.DrawLine(qPen, qx, qy + 10, qx + 6, qy + 10);
+                        g.DrawLine(qPen, qx + 8, qy + 8, qx + 11, qy + 10);
+                        g.DrawLine(qPen, qx + 11, qy + 10, qx + 8, qy + 12);
+                    }
+                    Rectangle textRect = new Rectangle(r.X + 26, r.Y, r.Width - 32, r.Height);
+                    TextRenderer.DrawText(g, "Queue", FontManager.ListExeFont, textRect, fg,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                }
+                else
+                {
+                    using (Pen plusPen = new Pen(fg, 1.5f))
+                    {
+                        int px = r.X + 17;
+                        int py = r.Y + r.Height / 2;
+                        g.DrawLine(plusPen, px, py - 4, px, py + 4);
+                        g.DrawLine(plusPen, px - 4, py, px + 4, py);
+                    }
+                    Rectangle textRect = new Rectangle(r.X + 24, r.Y, r.Width - 30, r.Height);
+                    string label = _isLaunchingExtra ? "..." : "Launch";
+                    TextRenderer.DrawText(g, label, FontManager.ListExeFont, textRect, fg,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                }
+            }
+        }
+    }
+
+    public enum QueueItemState
+    {
+        Pending,
+        Running,
+        Completed
+    }
+
+    public enum QueuePhase
+    {
+        Idle,
+        PlayingGame,
+        BreakCooldown
+    }
+
+    public class QueueItem
+    {
+        public GameItem Game;
+        public int PlannedPlaySeconds;
+        public int PlannedBreakAfterSeconds;
+        public QueueItemState State;
+        public int ActualPlayedSeconds;
+    }
+
+    public class QueueStripControl : Control
+    {
+        public const int MaxQueueItems = 5;
+
+        private bool _isConcurrentMode = false;
+        private List<QueueItem> _items = new List<QueueItem>();
+        private int _activeIndex = -1;
+        private QueuePhase _phase = QueuePhase.Idle;
+        private double _activeElapsedSeconds = 0;
+        private double _breakElapsedSeconds = 0;
+        private int _breakTargetSeconds = 0;
+
+        private GameItem _concurrentPrimaryGame;
+        private double _concurrentPrimaryElapsed = 0;
+        private List<ExtraGameInstance> _concurrentExtras = new List<ExtraGameInstance>();
+
+        private int _hoveredKind = 0; // 0 = none, 1 = tile, 2 = connector
+        private int _hoveredIndex = -1;
+        private ToolTip _toolTip;
+        private Dictionary<string, Image> _iconCache = new Dictionary<string, Image>();
+
+#pragma warning disable 67
+        public event EventHandler AddGameClicked;
+#pragma warning restore 67
+        public event Action<int> RemoveGameRequested;
+        public event Action<ExtraGameInstance> ConcurrentStopRequested;
+        public event MouseEventHandler EmptyMouseDown;
+
+        public QueueStripControl(ToolTip toolTip)
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            this.Size = new Size(420, 44);
+            _toolTip = toolTip;
+        }
+
+        public void UpdateState(List<QueueItem> items, int activeIndex, QueuePhase phase,
+            double activeElapsedSeconds, double breakElapsedSeconds, int breakTargetSeconds)
+        {
+            _isConcurrentMode = false;
+            _items = items != null ? new List<QueueItem>(items) : new List<QueueItem>();
+            _activeIndex = activeIndex;
+            _phase = phase;
+            _activeElapsedSeconds = activeElapsedSeconds;
+            _breakElapsedSeconds = breakElapsedSeconds;
+            _breakTargetSeconds = breakTargetSeconds;
+            _concurrentExtras.Clear();
+            ClampHover();
+            RefreshTooltip();
+            Invalidate();
+        }
+
+        public void UpdateConcurrentState(GameItem primaryGame, double primaryElapsedSeconds, List<ExtraGameInstance> extras)
+        {
+            _isConcurrentMode = true;
+            _concurrentPrimaryGame = primaryGame;
+            _concurrentPrimaryElapsed = primaryElapsedSeconds;
+            _concurrentExtras = extras != null ? new List<ExtraGameInstance>(extras) : new List<ExtraGameInstance>();
+            ClampHover();
+            RefreshTooltip();
+            Invalidate();
+        }
+
+        private void ClampHover()
+        {
+            int tileCount = GetTileCount();
+            if (_hoveredKind == 1 && _hoveredIndex >= tileCount) { _hoveredKind = 0; _hoveredIndex = -1; }
+            if (_hoveredKind == 2 && _hoveredIndex >= tileCount - 1) { _hoveredKind = 0; _hoveredIndex = -1; }
+            if (_hoveredKind > 2) { _hoveredKind = 0; _hoveredIndex = -1; }
+        }
+
+        public void RefreshTooltip()
+        {
+            if (_toolTip == null) return;
+            string tip = "";
+            if (_isConcurrentMode)
+            {
+                if (_hoveredKind == 1 && _hoveredIndex == 0 && _concurrentPrimaryGame != null)
+                {
+                    string name = !string.IsNullOrEmpty(_concurrentPrimaryGame.name) ? _concurrentPrimaryGame.name : "Game";
+                    tip = name + " — Elapsed: " + FormatDuration((int)Math.Floor(_concurrentPrimaryElapsed)) + " (Running)";
+                }
+                else if (_hoveredKind == 1 && _hoveredIndex >= 1 && _hoveredIndex - 1 < _concurrentExtras.Count)
+                {
+                    ExtraGameInstance inst = _concurrentExtras[_hoveredIndex - 1];
+                    string name = inst.Game != null && !string.IsNullOrEmpty(inst.Game.name) ? inst.Game.name : "Game";
+                    int elapsed = inst.Stopwatch != null ? (int)Math.Floor(inst.Stopwatch.Elapsed.TotalSeconds) : 0;
+                    tip = name + " — Elapsed: " + FormatDuration(elapsed) + " — Click to stop";
+                }
+            }
+            else if (_hoveredKind == 1 && _hoveredIndex >= 0 && _hoveredIndex < _items.Count)
+            {
+                QueueItem item = _items[_hoveredIndex];
+                string name = item.Game != null && !string.IsNullOrEmpty(item.Game.name) ? item.Game.name : "Game";
+                if (item.State == QueueItemState.Running)
+                {
+                    int elapsed = Math.Max(0, (int)Math.Floor(_activeElapsedSeconds));
+                    int left = Math.Max(0, item.PlannedPlaySeconds - elapsed);
+                    tip = name + " — Elapsed: " + FormatDuration(elapsed) + " / " +
+                          FormatShortDuration(item.PlannedPlaySeconds) + " (" + FormatShortDuration(left) + " left)";
+                }
+                else if (item.State == QueueItemState.Completed)
+                {
+                    tip = name + " — Completed (" + FormatShortDuration(item.ActualPlayedSeconds) + ")";
+                }
+                else
+                {
+                    int mins = Math.Max(1, (int)Math.Round(item.PlannedPlaySeconds / 60.0));
+                    tip = name + " — Queued (~" + mins + "m) — Click to remove";
+                }
+            }
+            else if (_hoveredKind == 2 && _hoveredIndex >= 0 && _hoveredIndex < _items.Count - 1)
+            {
+                QueueItem current = _items[_hoveredIndex];
+                QueueItem next = _items[_hoveredIndex + 1];
+                string nextName = next.Game != null && !string.IsNullOrEmpty(next.Game.name) ? next.Game.name : "Next game";
+                if (_phase == QueuePhase.BreakCooldown && _hoveredIndex == _activeIndex)
+                {
+                    int elapsed = Math.Max(0, (int)Math.Floor(_breakElapsedSeconds));
+                    tip = "Break before " + nextName + " — Elapsed: " + FormatShortDuration(elapsed) + " / " +
+                          FormatShortDuration(_breakTargetSeconds);
+                }
+                else
+                {
+                    int mins = Math.Max(1, (int)Math.Round(current.PlannedBreakAfterSeconds / 60.0));
+                    tip = "Random break: ~" + mins + "m before " + nextName;
+                }
+            }
+
+            if (_toolTip.GetToolTip(this) != tip)
+            {
+                _toolTip.SetToolTip(this, tip);
+            }
+        }
+
+        private static string FormatDuration(int totalSeconds)
+        {
+            if (totalSeconds < 0) totalSeconds = 0;
+            int h = totalSeconds / 3600;
+            int m = (totalSeconds % 3600) / 60;
+            int s = totalSeconds % 60;
+            return string.Format("{0:00}:{1:00}:{2:00}", h, m, s);
+        }
+
+        private static string FormatShortDuration(int totalSeconds)
+        {
+            if (totalSeconds < 0) totalSeconds = 0;
+            int m = totalSeconds / 60;
+            int s = totalSeconds % 60;
+            return string.Format("{0:00}:{1:00}", m, s);
+        }
+
+        private static string FormatCompactRemaining(int totalSeconds)
+        {
+            if (totalSeconds < 0) totalSeconds = 0;
+            if (totalSeconds >= 60) return ((totalSeconds + 59) / 60) + "m";
+            return totalSeconds + "s";
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            _iconCache.Clear();
+        }
+
+        private int GetTileCount()
+        {
+            return _isConcurrentMode ? (1 + _concurrentExtras.Count) : _items.Count;
+        }
+
+        private void GetMetrics(out int tileSize, out int connWidth, out int startX)
+        {
+            int count = GetTileCount();
+            if (count <= 3) { tileSize = 34; connWidth = _isConcurrentMode ? 36 : 44; }
+            else if (count == 4) { tileSize = 30; connWidth = 36; }
+            else { tileSize = 26; connWidth = 26; }
+
+            int chainWidth = count > 0 ? (count * tileSize + (count - 1) * connWidth) : 0;
+            startX = (Width - chainWidth) / 2;
+        }
+
+        private Rectangle GetTileRect(int index)
+        {
+            int tileSize, connWidth, startX;
+            GetMetrics(out tileSize, out connWidth, out startX);
+            int x = startX + index * (tileSize + connWidth);
+            int y = (Height - tileSize) / 2;
+            return new Rectangle(x, y, tileSize, tileSize);
+        }
+
+        private Rectangle GetConnectorRect(int index)
+        {
+            int tileSize, connWidth, startX;
+            GetMetrics(out tileSize, out connWidth, out startX);
+            int x = startX + index * (tileSize + connWidth) + tileSize;
+            return new Rectangle(x, 0, connWidth, Height);
+        }
+
+        private Image GetCachedIcon(GameItem item, int size)
+        {
+            if (item == null) return null;
+            string key = (item.id ?? "") + "_" + (item.icon ?? item.NormalizedName) + "_" + size;
+            if (_iconCache.ContainsKey(key)) return _iconCache[key];
+
+            Image img = IconCache.Instance.GetIcon(item, size, 7, (loaded) =>
+            {
+                if (this.IsHandleCreated && !this.IsDisposed)
+                {
+                    try
+                    {
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            if (!this.IsDisposed)
+                            {
+                                _iconCache[key] = loaded;
+                                Invalidate();
+                            }
+                        }));
+                    }
+                    catch { }
+                }
+            });
+            _iconCache[key] = img;
+            return img;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int count = GetTileCount();
+            int newKind = 0;
+            int newIndex = -1;
+
+            for (int i = 0; i < count; i++)
+            {
+                if (GetTileRect(i).Contains(e.Location))
+                {
+                    newKind = 1;
+                    newIndex = i;
+                    break;
+                }
+                if (i < count - 1 && GetConnectorRect(i).Contains(e.Location))
+                {
+                    newKind = 2;
+                    newIndex = i;
+                    break;
+                }
+            }
+            if (newKind != _hoveredKind || newIndex != _hoveredIndex)
+            {
+                _hoveredKind = newKind;
+                _hoveredIndex = newIndex;
+                bool hand = false;
+                if (_hoveredKind == 1)
+                {
+                    if (_isConcurrentMode) hand = _hoveredIndex >= 1;
+                    else if (_hoveredIndex >= 0 && _hoveredIndex < _items.Count) hand = _items[_hoveredIndex].State == QueueItemState.Pending;
+                }
+                this.Cursor = hand ? Cursors.Hand : Cursors.Default;
+                RefreshTooltip();
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_hoveredKind != 0)
+            {
+                _hoveredKind = 0;
+                _hoveredIndex = -1;
+                this.Cursor = Cursors.Default;
+                RefreshTooltip();
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+
+            int count = GetTileCount();
+            for (int i = 0; i < count; i++)
+            {
+                if (GetTileRect(i).Contains(e.Location))
+                {
+                    if (_isConcurrentMode)
+                    {
+                        if (i >= 1 && i - 1 < _concurrentExtras.Count && ConcurrentStopRequested != null)
+                        {
+                            ConcurrentStopRequested(_concurrentExtras[i - 1]);
+                        }
+                    }
+                    else if (_items[i].State == QueueItemState.Pending && RemoveGameRequested != null)
+                    {
+                        RemoveGameRequested(i);
+                    }
+                    return;
+                }
+            }
+            if (EmptyMouseDown != null) EmptyMouseDown(this, e);
+        }
+
+        private void PaintGameIcon(Graphics g, GameItem game, Rectangle r)
+        {
+            Image img = GetCachedIcon(game, r.Width);
+            if (img != null)
+            {
+                g.DrawImage(img, r, 0, 0, img.Width, img.Height, GraphicsUnit.Pixel);
+            }
+            else
+            {
+                using (SolidBrush bg = new SolidBrush(Theme.BgSurface)) g.FillRectangle(bg, r);
+                string initial = (game != null && !string.IsNullOrEmpty(game.name))
+                    ? game.name.Substring(0, 1).ToUpperInvariant() : "G";
+                TextRenderer.DrawText(g, initial, FontManager.SmallFont, r, Theme.TextPrimary,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            if (_isConcurrentMode)
+            {
+                int count = GetTileCount();
+                for (int i = 0; i < count; i++)
+                {
+                    GameItem game = (i == 0) ? _concurrentPrimaryGame : _concurrentExtras[i - 1].Game;
+                    Rectangle r = GetTileRect(i);
+                    bool hovered = (_hoveredKind == 1 && _hoveredIndex == i && i >= 1);
+
+                    using (GraphicsPath clipPath = Program.GetRoundedPath(r, 7))
+                    {
+                        GraphicsState saved = g.Save();
+                        g.SetClip(clipPath);
+                        PaintGameIcon(g, game, r);
+                        if (hovered)
+                        {
+                            using (SolidBrush hoverOverlay = new SolidBrush(Color.FromArgb(175, 11, 11, 15)))
+                            {
+                                g.FillRectangle(hoverOverlay, r);
+                            }
+                        }
+                        g.Restore(saved);
+                    }
+
+                    using (GraphicsPath borderPath = Program.GetRoundedPath(new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), 7))
+                    using (Pen borderPen = new Pen(hovered ? Theme.AccentViolet : Theme.BorderSubtle, 1f))
+                    {
+                        g.DrawPath(borderPen, borderPath);
+                    }
+
+                    if (hovered)
+                    {
+                        using (Pen xPen = new Pen(Color.White, 1.6f))
+                        {
+                            int cx = r.X + r.Width / 2;
+                            int cy = r.Y + r.Height / 2;
+                            g.DrawLine(xPen, cx - 4, cy - 4, cx + 4, cy + 4);
+                            g.DrawLine(xPen, cx + 4, cy - 4, cx - 4, cy + 4);
+                        }
+                    }
+                    else
+                    {
+                        Rectangle dotRect = new Rectangle(r.Right - 7, r.Bottom - 7, 6, 6);
+                        using (SolidBrush bgDot = new SolidBrush(Theme.BgBase))
+                        {
+                            g.FillEllipse(bgDot, dotRect.X - 1, dotRect.Y - 1, dotRect.Width + 2, dotRect.Height + 2);
+                        }
+                        using (SolidBrush dotBrush = new SolidBrush(Theme.StatusGreen))
+                        {
+                            g.FillEllipse(dotBrush, dotRect);
+                        }
+                    }
+
+                    // Plain line connector (---) with no arrow when running concurrent games without a queue
+                    if (i < count - 1)
+                    {
+                        Rectangle cr = GetConnectorRect(i);
+                        int lineY = cr.Y + cr.Height / 2;
+                        using (Pen linePen = new Pen(Theme.TextMuted, 1.5f))
+                        {
+                            g.DrawLine(linePen, cr.X + 5, lineY, cr.Right - 5, lineY);
+                        }
+                    }
+                }
+                return;
+            }
+
+            for (int i = 0; i < _items.Count; i++)
+            {
+                QueueItem item = _items[i];
+                Rectangle r = GetTileRect(i);
+                bool tileHovered = (_hoveredKind == 1 && _hoveredIndex == i);
+
+                using (GraphicsPath clipPath = Program.GetRoundedPath(r, 7))
+                {
+                    GraphicsState saved = g.Save();
+                    g.SetClip(clipPath);
+                    PaintGameIcon(g, item.Game, r);
+
+                    if (item.State == QueueItemState.Running)
+                    {
+                        double ratio = item.PlannedPlaySeconds > 0
+                            ? Math.Max(0.0, Math.Min(1.0, _activeElapsedSeconds / item.PlannedPlaySeconds))
+                            : 0.0;
+                        int fillW = (int)Math.Round(r.Width * ratio);
+                        if (fillW > 0)
+                        {
+                            using (SolidBrush fillBrush = new SolidBrush(Color.FromArgb(115, 124, 92, 255)))
+                            {
+                                g.FillRectangle(fillBrush, r.X, r.Y, fillW, r.Height);
+                            }
+                        }
+
+                        int bandHeight = 13;
+                        Rectangle bandRect = new Rectangle(r.X, r.Bottom - bandHeight, r.Width, bandHeight);
+                        using (SolidBrush bandBrush = new SolidBrush(Color.FromArgb(175, 11, 11, 15)))
+                        {
+                            g.FillRectangle(bandBrush, bandRect);
+                        }
+                        if (fillW > 0)
+                        {
+                            using (SolidBrush accentBar = new SolidBrush(Theme.StatusGreen))
+                            {
+                                g.FillRectangle(accentBar, r.X, r.Bottom - 2, fillW, 2);
+                            }
+                        }
+
+                        int leftSeconds = Math.Max(0, item.PlannedPlaySeconds - (int)Math.Floor(_activeElapsedSeconds));
+                        TextRenderer.DrawText(g, FormatCompactRemaining(leftSeconds), FontManager.QueueTinyFont, bandRect,
+                            Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                    }
+                    else if (item.State == QueueItemState.Completed)
+                    {
+                        using (SolidBrush doneOverlay = new SolidBrush(Color.FromArgb(120, 11, 11, 15)))
+                        {
+                            g.FillRectangle(doneOverlay, r);
+                        }
+                    }
+                    else if (tileHovered)
+                    {
+                        using (SolidBrush hoverOverlay = new SolidBrush(Color.FromArgb(175, 11, 11, 15)))
+                        {
+                            g.FillRectangle(hoverOverlay, r);
+                        }
+                    }
+
+                    g.Restore(saved);
+                }
+
+                Color borderColor = Theme.BorderSubtle;
+                float borderWidth = 1f;
+                if (item.State == QueueItemState.Running) { borderColor = Theme.AccentViolet; borderWidth = 1.5f; }
+                else if (item.State == QueueItemState.Completed) { borderColor = Theme.StatusGreen; }
+                else if (tileHovered) { borderColor = Theme.AccentViolet; }
+
+                using (GraphicsPath borderPath = Program.GetRoundedPath(new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), 7))
+                using (Pen borderPen = new Pen(borderColor, borderWidth))
+                {
+                    g.DrawPath(borderPen, borderPath);
+                }
+
+                if (item.State == QueueItemState.Completed)
+                {
+                    using (Pen checkPen = new Pen(Theme.StatusGreen, 1.8f))
+                    {
+                        int cx = r.Right - 9;
+                        int cy = r.Bottom - 7;
+                        g.DrawLine(checkPen, cx - 3, cy, cx - 1, cy + 2);
+                        g.DrawLine(checkPen, cx - 1, cy + 2, cx + 4, cy - 3);
+                    }
+                }
+                else if (item.State == QueueItemState.Pending && tileHovered)
+                {
+                    using (Pen xPen = new Pen(Color.White, 1.6f))
+                    {
+                        int cx = r.X + r.Width / 2;
+                        int cy = r.Y + r.Height / 2;
+                        g.DrawLine(xPen, cx - 4, cy - 4, cx + 4, cy + 4);
+                        g.DrawLine(xPen, cx + 4, cy - 4, cx - 4, cy + 4);
+                    }
+                }
+
+                if (i < _items.Count - 1)
+                {
+                    Rectangle ar = GetConnectorRect(i);
+                    bool activeBreak = (_phase == QueuePhase.BreakCooldown && i == _activeIndex);
+                    Color arrowColor = activeBreak ? Theme.AccentViolet : Theme.TextMuted;
+                    string timerText;
+                    if (activeBreak)
+                    {
+                        int leftBreak = Math.Max(0, _breakTargetSeconds - (int)Math.Floor(_breakElapsedSeconds));
+                        timerText = FormatShortDuration(leftBreak);
+                    }
+                    else
+                    {
+                        int mins = Math.Max(1, (int)Math.Round(item.PlannedBreakAfterSeconds / 60.0));
+                        timerText = mins + "m";
+                    }
+
+                    Rectangle labelRect = new Rectangle(ar.X, ar.Y + 4, ar.Width, 14);
+                    TextRenderer.DrawText(g, timerText, FontManager.QueueTinyFont, labelRect, arrowColor,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+                    int lineY = ar.Y + ar.Height / 2 + 6;
+                    int x1 = ar.X + 4;
+                    int x2 = ar.Right - 4;
+                    using (Pen arrowPen = new Pen(arrowColor, 1.5f))
+                    {
+                        g.DrawLine(arrowPen, x1, lineY, x2, lineY);
+                        g.DrawLine(arrowPen, x2 - 4, lineY - 3, x2, lineY);
+                        g.DrawLine(arrowPen, x2 - 4, lineY + 3, x2, lineY);
+                    }
+                }
+            }
+        }
+    }
+
     #region Main Form
 
     public class MainForm : Form, IMessageFilter
@@ -3267,7 +4018,6 @@ namespace DiscordQuestLauncher
         private string currentDisplayName = "";
         private bool isSimulatingMode = false;
         private bool isSwitchingProcesses = false;
-        private bool minimizeToTrayEnabled = true;
 
         private Stopwatch sessionStopwatch;
         private System.Windows.Forms.Timer timerQualification;
@@ -3293,13 +4043,11 @@ namespace DiscordQuestLauncher
         private bool _isMouseInWindow = false;
         private bool _isHoveringClose = false;
         private bool _isHoveringMinimize = false;
-        private bool _isHoveringTrayBtn = false;
         private bool _isHoveringAddBtn = false;
 
-        private readonly Rectangle CloseRect = new Rectangle(330, 12, 18, 18);
-        private readonly Rectangle MinimizeRect = new Rectangle(304, 12, 18, 18);
-        private readonly Rectangle TrayBtnRect = new Rectangle(32, 436, 22, 22);
-        private readonly Rectangle AddBtnRect = new Rectangle(306, 436, 22, 22);
+        private readonly Rectangle CloseRect = new Rectangle(390, 12, 18, 18);
+        private readonly Rectangle MinimizeRect = new Rectangle(364, 12, 18, 18);
+        private readonly Rectangle AddBtnRect = new Rectangle(376, 440, 22, 22);
 
         private Process dummyProcess;
         private string dummyExePath;
@@ -3308,6 +4056,24 @@ namespace DiscordQuestLauncher
 
         private GameItem selectedGame;
         private GameItem activeSimulatingGame;
+        private readonly List<ExtraGameInstance> extraInstances = new List<ExtraGameInstance>();
+        private bool isLaunchingExtra = false;
+        private MultiInstanceStripControl extraStripControl;
+        private Panel pnlExtraSearch;
+        private TextBox txtExtraSearch;
+        private SearchDropdownList extraSearchDropdown;
+        private System.Windows.Forms.Timer debounceExtraSearchTimer;
+        private string extraSearchResultsQuery = "";
+        private readonly List<QueueItem> queueItems = new List<QueueItem>();
+        private readonly Random queueRandom = new Random();
+        private bool isQueuePanelVisible = false;
+        private bool isQueueRunning = false;
+        private QueuePhase queuePhase = QueuePhase.Idle;
+        private int queueActiveIndex = -1;
+        private Stopwatch queueBreakStopwatch;
+        private int queueBreakTargetSeconds = 0;
+        private QueueStripControl queueStripControl;
+        private bool isPickerForQueue = false;
         private string startupGameArg = null;
         private bool hasBeenShown;
         private string searchResultsQuery = "";
@@ -3351,10 +4117,6 @@ namespace DiscordQuestLauncher
                         this.StartPosition = FormStartPosition.Manual;
                         this.Location = new Point(x, y);
                     }
-                }
-                if (args.Length >= 6)
-                {
-                    minimizeToTrayEnabled = (args[5] == "1");
                 }
                 currentExeName = args.Length >= 7 && !string.IsNullOrEmpty(args[6]) ? args[6] : Path.GetFileName(Application.ExecutablePath);
 
@@ -3434,10 +4196,10 @@ namespace DiscordQuestLauncher
 
         private void InitializeWindow()
         {
-            // Fixed size 360x480, non-resizable, frameless with no visible title bar
-            this.ClientSize = new Size(360, 480);
-            this.MinimumSize = new Size(360, 480);
-            this.MaximumSize = new Size(360, 480);
+            // Fixed size 420x480, non-resizable, frameless with no visible title bar
+            this.ClientSize = new Size(420, 480);
+            this.MinimumSize = new Size(420, 480);
+            this.MaximumSize = new Size(420, 480);
             this.FormBorderStyle = FormBorderStyle.None;
             this.ControlBox = false;
             this.MaximizeBox = false;
@@ -3476,14 +4238,26 @@ namespace DiscordQuestLauncher
 
             timerHoverCheck.Tick += (s, e) =>
             {
-                if (dummyProcess != null && dummyHwnd == IntPtr.Zero) SyncDummyWindow();
+                bool needsSync = (dummyProcess != null && dummyHwnd == IntPtr.Zero);
+                if (!needsSync)
+                {
+                    for (int i = 0; i < extraInstances.Count; i++)
+                    {
+                        if (extraInstances[i].DummyProcess != null && extraInstances[i].DummyHwnd == IntPtr.Zero)
+                        {
+                            needsSync = true;
+                            break;
+                        }
+                    }
+                }
+                if (needsSync) SyncDummyWindow();
                 if (!Visible || WindowState == FormWindowState.Minimized) return;
                 Point pt = this.PointToClient(Cursor.Position);
                 bool inWin = this.ClientRectangle.Contains(pt);
                 if (inWin != _isMouseInWindow)
                 {
                     _isMouseInWindow = inWin;
-                    Invalidate(new Rectangle(300, 10, 52, 24));
+                    Invalidate(new Rectangle(360, 10, 52, 24));
                 }
             };
             timerHoverCheck.Start();
@@ -3491,6 +4265,10 @@ namespace DiscordQuestLauncher
             debounceSearchTimer = new System.Windows.Forms.Timer();
             debounceSearchTimer.Interval = 120;
             debounceSearchTimer.Tick += OnDebounceSearchTick;
+
+            debounceExtraSearchTimer = new System.Windows.Forms.Timer();
+            debounceExtraSearchTimer.Interval = 120;
+            debounceExtraSearchTimer.Tick += OnDebounceExtraSearchTick;
 
             BuildMinimalUI();
         }
@@ -3514,7 +4292,7 @@ namespace DiscordQuestLauncher
             // 1. Hero (~50% height)
             heroControl = new HeroGameControl();
             heroControl.Location = new Point(0, 38);
-            heroControl.Size = new Size(360, 180);
+            heroControl.Size = new Size(420, 180);
             heroControl.SetGame(initialGame, false);
             heroControl.NameClicked += (s, e) => OpenInlineSearch();
             heroControl.EmptyMouseDown += (s, e) => Program.DragWindow(this.Handle);
@@ -3523,11 +4301,20 @@ namespace DiscordQuestLauncher
             // 2. Switcher: row of 32px icons, 8px gap, centered
             switcherControl = new GameSwitcherControl(globalToolTip);
             switcherControl.Location = new Point(0, 244);
-            switcherControl.Size = new Size(360, 40);
+            switcherControl.Size = new Size(420, 40);
             switcherControl.GameSelected += (game) => SelectGame(game);
             switcherControl.EmptyMouseDown += (s, e) => Program.DragWindow(this.Handle);
             this.Controls.Add(switcherControl);
             RefreshSwitcherList();
+
+            queueStripControl = new QueueStripControl(globalToolTip);
+            queueStripControl.Location = new Point(0, 288);
+            queueStripControl.Size = new Size(420, 44);
+            queueStripControl.Visible = false;
+            queueStripControl.RemoveGameRequested += OnQueueRemoveRequested;
+            queueStripControl.ConcurrentStopRequested += (inst) => StopExtraSimulation(inst, true);
+            queueStripControl.EmptyMouseDown += (s, e) => Program.DragWindow(this.Handle);
+            this.Controls.Add(queueStripControl);
 
             // 3. Action: sleek compact pill button (148x36 idle, 196x36 running)
             btnAction = new PillActionButton();
@@ -3537,9 +4324,18 @@ namespace DiscordQuestLauncher
             btnAction.SetRunningState(false);
             globalToolTip.SetToolTip(btnAction, "The timer measures this local session, not Discord quest progress.");
 
+            extraStripControl = new MultiInstanceStripControl(globalToolTip);
+            extraStripControl.Location = new Point(0, 382);
+            extraStripControl.Size = new Size(420, 32);
+            extraStripControl.Visible = false;
+            extraStripControl.QueueButtonClicked += (s, e) => OpenQueueGamePicker();
+            extraStripControl.AddInstanceClicked += (s, e) => OpenExtraGamePicker();
+            extraStripControl.EmptyMouseDown += (s, e) => Program.DragWindow(this.Handle);
+            this.Controls.Add(extraStripControl);
+
             lblDiscordStatus = new Label();
-            lblDiscordStatus.Location = new Point(16, 383);
-            lblDiscordStatus.Size = new Size(328, 44);
+            lblDiscordStatus.Location = new Point(26, 383);
+            lblDiscordStatus.Size = new Size(368, 44);
             lblDiscordStatus.Font = FontManager.SmallFont;
             lblDiscordStatus.ForeColor = Theme.TextMuted;
             lblDiscordStatus.TextAlign = ContentAlignment.TopCenter;
@@ -3548,8 +4344,8 @@ namespace DiscordQuestLauncher
 
             // Floating inline search overlay (positioned exactly where the hero name is)
             pnlInlineSearch = new Panel();
-            pnlInlineSearch.Location = new Point(48, 150);
-            pnlInlineSearch.Size = new Size(264, 34);
+            pnlInlineSearch.Location = new Point(58, 150);
+            pnlInlineSearch.Size = new Size(304, 34);
             pnlInlineSearch.BackColor = Theme.BgInput;
             pnlInlineSearch.Visible = false;
 
@@ -3559,7 +4355,7 @@ namespace DiscordQuestLauncher
             txtInlineSearch.ForeColor = Theme.TextPrimary;
             txtInlineSearch.Font = FontManager.SearchFont;
             txtInlineSearch.Location = new Point(10, 8);
-            txtInlineSearch.Size = new Size(244, 20);
+            txtInlineSearch.Size = new Size(284, 20);
             txtInlineSearch.TextChanged += (s, e) =>
             {
                 pnlInlineSearch.Invalidate();
@@ -3590,8 +4386,8 @@ namespace DiscordQuestLauncher
             this.Controls.Add(pnlInlineSearch);
 
             searchDropdown = new SearchDropdownList();
-            searchDropdown.Location = new Point(36, 188);
-            searchDropdown.Size = new Size(288, 180);
+            searchDropdown.Location = new Point(46, 188);
+            searchDropdown.Size = new Size(328, 180);
             searchDropdown.Visible = false;
             searchDropdown.ItemSelected += (game) =>
             {
@@ -3599,6 +4395,59 @@ namespace DiscordQuestLauncher
                 AcceptSearchSelection(game);
             };
             this.Controls.Add(searchDropdown);
+
+            // Overlay picker for launching additional concurrent game instances while simulating
+            pnlExtraSearch = new Panel();
+            pnlExtraSearch.Location = new Point(58, 150);
+            pnlExtraSearch.Size = new Size(304, 34);
+            pnlExtraSearch.BackColor = Theme.BgInput;
+            pnlExtraSearch.Visible = false;
+
+            txtExtraSearch = new TextBox();
+            txtExtraSearch.BorderStyle = BorderStyle.None;
+            txtExtraSearch.BackColor = Theme.BgInput;
+            txtExtraSearch.ForeColor = Theme.TextPrimary;
+            txtExtraSearch.Font = FontManager.SearchFont;
+            txtExtraSearch.Location = new Point(10, 8);
+            txtExtraSearch.Size = new Size(284, 20);
+            txtExtraSearch.TextChanged += (s, e) =>
+            {
+                pnlExtraSearch.Invalidate();
+                debounceExtraSearchTimer.Stop();
+                debounceExtraSearchTimer.Start();
+            };
+            txtExtraSearch.KeyDown += OnExtraSearchKeyDown;
+            pnlExtraSearch.Controls.Add(txtExtraSearch);
+
+            pnlExtraSearch.Paint += (s, pe) =>
+            {
+                pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle bRect = new Rectangle(0, 0, pnlExtraSearch.Width - 1, pnlExtraSearch.Height - 1);
+                using (GraphicsPath bp = Program.GetRoundedPath(bRect, 8))
+                {
+                    using (Pen ring = new Pen(Theme.AccentFocus, 1.5f))
+                    {
+                        pe.Graphics.DrawPath(ring, bp);
+                    }
+                }
+                if (string.IsNullOrEmpty(txtExtraSearch.Text))
+                {
+                    string hint = isPickerForQueue ? "Add game to queue..." : "Run another game...";
+                    TextRenderer.DrawText(pe.Graphics, hint, FontManager.SearchFont, new Point(10, 8), Theme.TextMuted);
+                }
+            };
+            this.Controls.Add(pnlExtraSearch);
+
+            extraSearchDropdown = new SearchDropdownList();
+            extraSearchDropdown.Location = new Point(46, 188);
+            extraSearchDropdown.Size = new Size(328, 180);
+            extraSearchDropdown.Visible = false;
+            extraSearchDropdown.ItemSelected += (game) =>
+            {
+                if (EnsureExtraSearchResultsCurrent()) return;
+                AcceptExtraSearchSelection(game);
+            };
+            this.Controls.Add(extraSearchDropdown);
         }
 
         private void SelectGame(GameItem game)
@@ -3664,12 +4513,72 @@ namespace DiscordQuestLauncher
 
         private void CloseInlineSearch()
         {
-            RemoveOutsideClickFilter();
             debounceSearchTimer.Stop();
             pnlInlineSearch.Visible = false;
             searchDropdown.Visible = false;
             heroControl.IsSearchActive = false;
+            RemoveOutsideClickFilterIfIdle();
             this.ActiveControl = btnAction;
+        }
+
+        private void OpenExtraGamePicker()
+        {
+            if (!isSimulatingMode || isQueueRunning || isLaunching || isLaunchingExtra) return;
+            if (extraInstances.Count >= MultiInstanceStripControl.MaxExtraInstances) return;
+            if (pnlExtraSearch.Visible) return;
+
+            isPickerForQueue = false;
+            pnlExtraSearch.Invalidate();
+            pnlExtraSearch.Visible = true;
+            pnlExtraSearch.BringToFront();
+            txtExtraSearch.Text = "";
+            txtExtraSearch.Focus();
+
+            extraSearchDropdown.Visible = true;
+            extraSearchDropdown.BringToFront();
+            List<GameItem> initialMatches = FilterNonRunningGames(GameDatabase.Instance.Search("", 15));
+            extraSearchDropdown.SetResults(initialMatches);
+            extraSearchResultsQuery = "";
+
+            if (!_outsideClickFilterActive)
+            {
+                Application.AddMessageFilter(this);
+                _outsideClickFilterActive = true;
+            }
+        }
+
+        private void OpenQueueGamePicker()
+        {
+            if (isLaunching || extraInstances.Count > 0 || queueItems.Count >= QueueStripControl.MaxQueueItems) return;
+            if (pnlExtraSearch.Visible) return;
+
+            isPickerForQueue = true;
+            pnlExtraSearch.Invalidate();
+            pnlExtraSearch.Visible = true;
+            pnlExtraSearch.BringToFront();
+            txtExtraSearch.Text = "";
+            txtExtraSearch.Focus();
+
+            extraSearchDropdown.Visible = true;
+            extraSearchDropdown.BringToFront();
+            List<GameItem> initialMatches = FilterNonQueuedGames(GameDatabase.Instance.Search("", 15));
+            extraSearchDropdown.SetResults(initialMatches);
+            extraSearchResultsQuery = "";
+
+            if (!_outsideClickFilterActive)
+            {
+                Application.AddMessageFilter(this);
+                _outsideClickFilterActive = true;
+            }
+        }
+
+        private void CloseExtraGamePicker()
+        {
+            if (debounceExtraSearchTimer != null) debounceExtraSearchTimer.Stop();
+            if (pnlExtraSearch != null) pnlExtraSearch.Visible = false;
+            if (extraSearchDropdown != null) extraSearchDropdown.Visible = false;
+            RemoveOutsideClickFilterIfIdle();
+            if (btnAction != null && !btnAction.IsDisposed) this.ActiveControl = btnAction;
         }
 
         private bool _outsideClickFilterActive;
@@ -3681,6 +4590,13 @@ namespace DiscordQuestLauncher
             _outsideClickFilterActive = false;
         }
 
+        private void RemoveOutsideClickFilterIfIdle()
+        {
+            bool inlineOpen = pnlInlineSearch != null && pnlInlineSearch.Visible;
+            bool extraOpen = pnlExtraSearch != null && pnlExtraSearch.Visible;
+            if (!inlineOpen && !extraOpen) RemoveOutsideClickFilter();
+        }
+
         // Light-dismiss for the search overlay. Mouse messages go to the HWND under the cursor, so
         // MainForm.OnMouseDown never sees clicks on the hero, switcher, pill button or status label.
         // A thread-level IMessageFilter runs before dispatch to ANY control, so one check covers them all.
@@ -3690,7 +4606,9 @@ namespace DiscordQuestLauncher
         {
             const int WM_LBUTTONDOWN = 0x0201, WM_RBUTTONDOWN = 0x0204, WM_MBUTTONDOWN = 0x0207;
             const int WM_NCLBUTTONDOWN = 0x00A1, WM_NCRBUTTONDOWN = 0x00A4;
-            if (!pnlInlineSearch.Visible) return false;
+            bool inlineOpen = pnlInlineSearch != null && pnlInlineSearch.Visible;
+            bool extraOpen = pnlExtraSearch != null && pnlExtraSearch.Visible;
+            if (!inlineOpen && !extraOpen) return false;
 
             Point screen;
             if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_RBUTTONDOWN || m.Msg == WM_MBUTTONDOWN)
@@ -3709,14 +4627,23 @@ namespace DiscordQuestLauncher
             }
             else return false;
 
-            if (!IsInsideSearchUi(screen)) CloseInlineSearch();
+            if (!IsInsideSearchUi(screen))
+            {
+                if (inlineOpen) CloseInlineSearch();
+                if (extraOpen) CloseExtraGamePicker();
+            }
             return false;
         }
 
         private bool IsInsideSearchUi(Point screenPoint)
         {
-            return RectangleToScreen(pnlInlineSearch.Bounds).Contains(screenPoint) ||
-                   (searchDropdown.Visible && RectangleToScreen(searchDropdown.Bounds).Contains(screenPoint));
+            bool inInline = pnlInlineSearch != null && pnlInlineSearch.Visible &&
+                (RectangleToScreen(pnlInlineSearch.Bounds).Contains(screenPoint) ||
+                 (searchDropdown != null && searchDropdown.Visible && RectangleToScreen(searchDropdown.Bounds).Contains(screenPoint)));
+            bool inExtra = pnlExtraSearch != null && pnlExtraSearch.Visible &&
+                (RectangleToScreen(pnlExtraSearch.Bounds).Contains(screenPoint) ||
+                 (extraSearchDropdown != null && extraSearchDropdown.Visible && RectangleToScreen(extraSearchDropdown.Bounds).Contains(screenPoint)));
+            return inInline || inExtra;
         }
 
         // Clicking another app / Alt-Tab never produces a mouse message on our thread, so close on focus loss too.
@@ -3724,6 +4651,7 @@ namespace DiscordQuestLauncher
         {
             base.OnDeactivate(e);
             if (pnlInlineSearch != null && pnlInlineSearch.Visible) CloseInlineSearch();
+            if (pnlExtraSearch != null && pnlExtraSearch.Visible) CloseExtraGamePicker();
         }
 
         private void OnDebounceSearchTick(object sender, EventArgs e)
@@ -3804,11 +4732,84 @@ namespace DiscordQuestLauncher
             }
         }
 
+        private void OnDebounceExtraSearchTick(object sender, EventArgs e)
+        {
+            debounceExtraSearchTimer.Stop();
+            string q = txtExtraSearch.Text.Trim();
+            List<GameItem> raw = GameDatabase.Instance.Search(q, 15);
+            List<GameItem> matches = isPickerForQueue ? FilterNonQueuedGames(raw) : FilterNonRunningGames(raw);
+            extraSearchDropdown.SetResults(matches);
+            extraSearchResultsQuery = q;
+        }
+
+        private bool EnsureExtraSearchResultsCurrent()
+        {
+            if (string.Equals(extraSearchResultsQuery, txtExtraSearch.Text.Trim(), StringComparison.Ordinal)) return false;
+            OnDebounceExtraSearchTick(this, EventArgs.Empty);
+            return true;
+        }
+
+        private void AcceptExtraSearchSelection(GameItem game)
+        {
+            if (game == null || isLaunching) return;
+            bool forQueue = isPickerForQueue;
+            CloseExtraGamePicker();
+            if (forQueue)
+            {
+                AddGameToQueue(game);
+            }
+            else
+            {
+                if (!isSimulatingMode || isLaunchingExtra) return;
+                LaunchExtraSimulation(game);
+            }
+        }
+
+        private void OnExtraSearchKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Down)
+            {
+                EnsureExtraSearchResultsCurrent();
+                extraSearchDropdown.MoveSelection(1);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.Up)
+            {
+                EnsureExtraSearchResultsCurrent();
+                extraSearchDropdown.MoveSelection(-1);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.Enter)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                EnsureExtraSearchResultsCurrent();
+                GameItem sel = extraSearchDropdown.SelectedItem;
+                if (sel != null) AcceptExtraSearchSelection(sel);
+            }
+            else if (e.KeyCode == Keys.Escape)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                CloseExtraGamePicker();
+            }
+        }
+
         private void OnActionButtonClicked(object sender, EventArgs e)
         {
-            if (isSimulatingMode)
+            if (isQueueRunning)
+            {
+                StopQueue();
+            }
+            else if (isSimulatingMode)
             {
                 StopSimulation();
+            }
+            else if (isQueuePanelVisible && HasPendingQueueItems())
+            {
+                StartQueue();
             }
             else
             {
@@ -3903,11 +4904,12 @@ namespace DiscordQuestLauncher
 
             string mode = Program.GetLaunchMode();
 
-            if (mode != "classic")
+            if (mode != "classic" || isQueueRunning)
             {
                 // Copying and starting the helper may trigger antivirus scans.
                 // runs off the UI thread so the window never freezes or goes blank.
-                BeginAsyncLaunch(targetExePath, currentExePath, displayName, exeName, iconId, iconHash, mode);
+                string effectiveMode = (mode == "classic") ? "behind" : mode;
+                BeginAsyncLaunch(targetExePath, currentExePath, displayName, exeName, iconId, iconHash, effectiveMode);
                 return;
             }
 
@@ -3923,11 +4925,10 @@ namespace DiscordQuestLauncher
                 return;
             }
 
-            int trayFlag = minimizeToTrayEnabled ? 1 : 0;
             ProcessStartInfo cpsi = new ProcessStartInfo();
             cpsi.FileName = targetExePath;
-            cpsi.Arguments = string.Format("--simulating \"{0}\" \"{1}\" {2} {3} {4} \"{5}\" \"{6}\" \"{7}\"",
-                displayName, currentExePath, this.Location.X, this.Location.Y, trayFlag, exeName, iconId, iconHash);
+            cpsi.Arguments = string.Format("--simulating \"{0}\" \"{1}\" {2} {3} 1 \"{4}\" \"{5}\" \"{6}\"",
+                displayName, currentExePath, this.Location.X, this.Location.Y, exeName, iconId, iconHash);
             cpsi.UseShellExecute = true;
             try
             {
@@ -4029,28 +5030,496 @@ namespace DiscordQuestLauncher
             return dummyMode == "behind" || dummyMode == "single";
         }
 
-        // Keep the real (visible) game window exactly underneath this launcher window.
-        private void SyncDummyWindow()
+        private bool IsSameGameIdentity(GameItem a, GameItem b)
         {
-            if (dummyProcess == null || !DummyIsVisibleMode() || !this.IsHandleCreated) return;
-            try
+            if (a == null || b == null) return false;
+            if (!string.IsNullOrEmpty(a.exe) && !string.IsNullOrEmpty(b.exe) &&
+                string.Equals(a.exe, b.exe, StringComparison.OrdinalIgnoreCase)) return true;
+            if (!string.IsNullOrEmpty(a.name) && !string.IsNullOrEmpty(b.name) &&
+                string.Equals(a.name, b.name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        private bool IsGameAlreadyRunning(GameItem game)
+        {
+            if (game == null) return false;
+            if (IsSameGameIdentity(activeSimulatingGame, game)) return true;
+            for (int i = 0; i < extraInstances.Count; i++)
             {
-                if (dummyHwnd == IntPtr.Zero)
+                if (IsSameGameIdentity(extraInstances[i].Game, game)) return true;
+            }
+            return false;
+        }
+
+        private List<GameItem> FilterNonRunningGames(List<GameItem> source)
+        {
+            List<GameItem> filtered = new List<GameItem>();
+            if (source == null) return filtered;
+            for (int i = 0; i < source.Count; i++)
+            {
+                GameItem item = source[i];
+                if (item == null || item.id == "__ADD_CUSTOM__") continue;
+                if (!IsGameAlreadyRunning(item)) filtered.Add(item);
+            }
+            return filtered;
+        }
+
+        private List<GameItem> FilterNonQueuedGames(List<GameItem> source)
+        {
+            List<GameItem> filtered = new List<GameItem>();
+            if (source == null) return filtered;
+            for (int i = 0; i < source.Count; i++)
+            {
+                GameItem item = source[i];
+                if (item == null || item.id == "__ADD_CUSTOM__") continue;
+                bool queued = isSimulatingMode && !isQueueRunning && activeSimulatingGame != null &&
+                              IsSameGameIdentity(activeSimulatingGame, item);
+                for (int q = 0; q < queueItems.Count && !queued; q++)
                 {
-                    dummyProcess.Refresh();
-                    dummyHwnd = dummyProcess.MainWindowHandle;
-                    if (dummyHwnd == IntPtr.Zero) dummyHwnd = Program.FindProcessWindow(dummyProcess.Id);
-                    if (dummyHwnd == IntPtr.Zero) return;
+                    if (IsSameGameIdentity(queueItems[q].Game, item)) queued = true;
                 }
-                bool visible = this.Visible && this.WindowState != FormWindowState.Minimized;
-                if (!visible)
+                if (!queued) filtered.Add(item);
+            }
+            return filtered;
+        }
+
+        private bool HasPendingQueueItems()
+        {
+            for (int i = 0; i < queueItems.Count; i++)
+            {
+                if (queueItems[i].State == QueueItemState.Pending) return true;
+            }
+            return false;
+        }
+
+        private void RefreshQueueStrip()
+        {
+            if (queueStripControl == null) return;
+            bool showQueue = (isQueueRunning && queueItems.Count > 0) || (isQueuePanelVisible && queueItems.Count > 0);
+            if (showQueue)
+            {
+                queueStripControl.Visible = true;
+                double activeElapsed = (isQueueRunning && queuePhase == QueuePhase.PlayingGame && sessionStopwatch != null)
+                    ? sessionStopwatch.Elapsed.TotalSeconds : 0.0;
+                double breakElapsed = (isQueueRunning && queuePhase == QueuePhase.BreakCooldown && queueBreakStopwatch != null)
+                    ? queueBreakStopwatch.Elapsed.TotalSeconds : 0.0;
+                queueStripControl.UpdateState(queueItems, queueActiveIndex, queuePhase, activeElapsed, breakElapsed, queueBreakTargetSeconds);
+            }
+            else if (isSimulatingMode && extraInstances.Count > 0)
+            {
+                queueStripControl.Visible = true;
+                double primaryElapsed = sessionStopwatch != null ? sessionStopwatch.Elapsed.TotalSeconds : 0.0;
+                queueStripControl.UpdateConcurrentState(activeSimulatingGame, primaryElapsed, extraInstances);
+            }
+            else
+            {
+                queueStripControl.Visible = false;
+            }
+        }
+
+        private void UpdateIdleActionButton()
+        {
+            if (isSimulatingMode || isQueueRunning || isLaunching || btnAction == null) return;
+            btnAction.ActionText = (isQueuePanelVisible && HasPendingQueueItems()) ? "Start Queue" : "Launch";
+        }
+
+        private void ToggleQueuePanel()
+        {
+            if (isQueueRunning)
+            {
+                isQueuePanelVisible = true;
+                RefreshQueueStrip();
+                return;
+            }
+            isQueuePanelVisible = !isQueuePanelVisible;
+            RefreshQueueStrip();
+            UpdateIdleActionButton();
+            Invalidate();
+        }
+
+        private void AddGameToQueue(GameItem rawGame)
+        {
+            if (rawGame == null || rawGame.id == "__ADD_CUSTOM__") return;
+            if (queueItems.Count >= QueueStripControl.MaxQueueItems) return;
+
+            if (isSimulatingMode && !isQueueRunning && activeSimulatingGame != null && queueItems.Count == 0)
+            {
+                QueueItem currentItem = new QueueItem();
+                currentItem.Game = activeSimulatingGame;
+                currentItem.PlannedPlaySeconds = queueRandom.Next(15 * 60, 25 * 60 + 1);
+                currentItem.PlannedBreakAfterSeconds = queueRandom.Next(10 * 60, 25 * 60 + 1);
+                currentItem.State = QueueItemState.Running;
+                currentItem.ActualPlayedSeconds = 0;
+                queueItems.Add(currentItem);
+                isQueueRunning = true;
+                queuePhase = QueuePhase.PlayingGame;
+                queueActiveIndex = 0;
+                UpdateMultiInstanceLayout();
+                UpdateTrayContextMenu();
+            }
+
+            if (queueItems.Count >= QueueStripControl.MaxQueueItems) return;
+
+            GameItem resolved = GameDatabase.Instance.ResolveGameMetadata(rawGame) ?? rawGame;
+            for (int i = 0; i < queueItems.Count; i++)
+            {
+                if (IsSameGameIdentity(queueItems[i].Game, resolved))
                 {
-                    if (Program.IsWindowVisible(dummyHwnd)) Program.ShowWindow(dummyHwnd, 0);
+                    isQueuePanelVisible = true;
+                    RefreshQueueStrip();
+                    UpdateIdleActionButton();
+                    Invalidate();
                     return;
                 }
-                if (!Program.IsWindowVisible(dummyHwnd) || Program.IsIconic(dummyHwnd))
-                    Program.ShowWindow(dummyHwnd, 4); // SW_SHOWNOACTIVATE
-                Program.PlaceBelow(dummyHwnd, this.Handle, this.Location.X, this.Location.Y);
+            }
+
+            QueueItem item = new QueueItem();
+            item.Game = resolved;
+            item.PlannedPlaySeconds = queueRandom.Next(15 * 60, 25 * 60 + 1);
+            item.PlannedBreakAfterSeconds = queueRandom.Next(10 * 60, 25 * 60 + 1);
+            item.State = QueueItemState.Pending;
+            item.ActualPlayedSeconds = 0;
+            queueItems.Add(item);
+
+            isQueuePanelVisible = true;
+            RefreshQueueStrip();
+            UpdateMultiInstanceLayout();
+            UpdateIdleActionButton();
+            Invalidate();
+        }
+
+        private void OnQueueRemoveRequested(int index)
+        {
+            if (index < 0 || index >= queueItems.Count) return;
+            if (queueItems[index].State != QueueItemState.Pending) return;
+            queueItems.RemoveAt(index);
+            if (isQueueRunning && index < queueActiveIndex) queueActiveIndex--;
+            RefreshQueueStrip();
+            UpdateMultiInstanceLayout();
+            UpdateIdleActionButton();
+            Invalidate();
+        }
+
+        private void StartQueue()
+        {
+            if (isSimulatingMode || isLaunching || isQueueRunning || queueItems.Count == 0) return;
+            if (!HasPendingQueueItems())
+            {
+                for (int i = 0; i < queueItems.Count; i++)
+                {
+                    queueItems[i].State = QueueItemState.Pending;
+                    queueItems[i].ActualPlayedSeconds = 0;
+                }
+            }
+
+            int startIdx = -1;
+            for (int i = 0; i < queueItems.Count; i++)
+            {
+                if (queueItems[i].State == QueueItemState.Pending) { startIdx = i; break; }
+            }
+            if (startIdx < 0) return;
+
+            isQueueRunning = true;
+            isQueuePanelVisible = true;
+            queueActiveIndex = startIdx;
+            queuePhase = QueuePhase.PlayingGame;
+            queueItems[queueActiveIndex].State = QueueItemState.Running;
+
+            GameItem game = queueItems[queueActiveIndex].Game;
+            SelectGame(game);
+            RefreshQueueStrip();
+            UpdateMultiInstanceLayout();
+            UpdateTrayContextMenu();
+            Invalidate();
+            LaunchSimulation(game.exe);
+        }
+
+        private void StopQueue()
+        {
+            isQueueRunning = false;
+            queuePhase = QueuePhase.Idle;
+            if (queueBreakStopwatch != null) queueBreakStopwatch.Stop();
+            queueBreakStopwatch = null;
+            queueBreakTargetSeconds = 0;
+            for (int i = 0; i < queueItems.Count; i++)
+            {
+                if (queueItems[i].State == QueueItemState.Running) queueItems[i].State = QueueItemState.Pending;
+            }
+            queueActiveIndex = -1;
+
+            if (isSimulatingMode)
+            {
+                StopSimulation();
+                return;
+            }
+
+            switcherControl.Enabled = true;
+            if (timerUIUpdate != null) timerUIUpdate.Stop();
+            if (timerQualification != null) timerQualification.Stop();
+            this.Text = "Quest Launcher";
+            Program.SetWindowText(this.Handle, "Quest Launcher");
+            if (heroControl != null) heroControl.IsRunning = false;
+            if (btnAction != null)
+            {
+                btnAction.TimerText = "";
+                btnAction.SetRunningState(false);
+                UpdateIdleActionButton();
+            }
+            RefreshQueueStrip();
+            UpdateMultiInstanceLayout();
+            UpdateTrayContextMenu();
+            RefreshDiscordStatus();
+            Invalidate();
+        }
+
+        private void AdvanceQueueFromGameComplete()
+        {
+            if (!isQueueRunning || queuePhase != QueuePhase.PlayingGame || queueActiveIndex < 0 || queueActiveIndex >= queueItems.Count) return;
+
+            QueueItem finished = queueItems[queueActiveIndex];
+            finished.State = QueueItemState.Completed;
+            finished.ActualPlayedSeconds = sessionStopwatch != null ? (int)sessionStopwatch.Elapsed.TotalSeconds : 0;
+
+            StopDiscordRpc();
+            KillDummy();
+            if (sessionStopwatch != null) sessionStopwatch.Stop();
+            TryRecordSession();
+            isSimulatingMode = false;
+            if (timerQualification != null) timerQualification.Stop();
+
+            if (queueActiveIndex + 1 < queueItems.Count)
+            {
+                queuePhase = QueuePhase.BreakCooldown;
+                queueBreakTargetSeconds = finished.PlannedBreakAfterSeconds;
+                queueBreakStopwatch = Stopwatch.StartNew();
+
+                GameItem nextGame = queueItems[queueActiveIndex + 1].Game;
+                if (heroControl != null)
+                {
+                    heroControl.SetGame(nextGame, true);
+                    heroControl.IsRunning = false;
+                }
+                if (btnAction != null)
+                {
+                    int m = queueBreakTargetSeconds / 60;
+                    int s = queueBreakTargetSeconds % 60;
+                    btnAction.ActionText = "Stop";
+                    btnAction.TimerText = string.Format("{0:00}:{1:00}", m, s);
+                    btnAction.SetRunningState(true);
+                }
+                this.Text = "Queue Break — " + (nextGame != null ? nextGame.name : "Next");
+                Program.SetWindowText(this.Handle, this.Text);
+                if (timerUIUpdate != null && !timerUIUpdate.Enabled) timerUIUpdate.Start();
+                RefreshQueueStrip();
+                UpdateMultiInstanceLayout();
+                UpdateTrayContextMenu();
+                RefreshDiscordStatus();
+            }
+            else
+            {
+                isQueueRunning = false;
+                queuePhase = QueuePhase.Idle;
+                queueActiveIndex = -1;
+                switcherControl.Enabled = true;
+                if (timerUIUpdate != null) timerUIUpdate.Stop();
+                this.Text = "Quest Launcher";
+                Program.SetWindowText(this.Handle, "Quest Launcher");
+                if (heroControl != null) heroControl.IsRunning = false;
+                if (btnAction != null)
+                {
+                    btnAction.TimerText = "";
+                    btnAction.SetRunningState(false);
+                    UpdateIdleActionButton();
+                }
+                RefreshQueueStrip();
+                UpdateMultiInstanceLayout();
+                UpdateTrayContextMenu();
+                RefreshSwitcherList();
+                RefreshDiscordStatus();
+                Invalidate();
+            }
+        }
+
+        private void UpdateMultiInstanceLayout()
+        {
+            bool showActionRow = isSimulatingMode || isQueueRunning;
+            bool canQueue = extraInstances.Count == 0 && queueItems.Count < QueueStripControl.MaxQueueItems && !isLaunching;
+            bool canLaunchAnother = isSimulatingMode && !isQueueRunning &&
+                                    extraInstances.Count < MultiInstanceStripControl.MaxExtraInstances && !isLaunching;
+            if (extraStripControl != null)
+            {
+                extraStripControl.Visible = showActionRow;
+                if (showActionRow) extraStripControl.SetActionStates(canQueue, canLaunchAnother, isLaunchingExtra);
+            }
+            if (lblDiscordStatus != null)
+            {
+                if (showActionRow)
+                {
+                    lblDiscordStatus.Location = new Point(56, 420);
+                    lblDiscordStatus.Size = new Size(308, 34);
+                }
+                else
+                {
+                    lblDiscordStatus.Location = new Point(26, 383);
+                    lblDiscordStatus.Size = new Size(368, 44);
+                }
+            }
+        }
+
+        private void LaunchExtraSimulation(GameItem rawGame)
+        {
+            if (!isSimulatingMode || isLaunching || isLaunchingExtra || rawGame == null || rawGame.id == "__ADD_CUSTOM__") return;
+            if (extraInstances.Count >= MultiInstanceStripControl.MaxExtraInstances) return;
+            if (IsGameAlreadyRunning(rawGame)) return;
+
+            GameItem resolved = GameDatabase.Instance.ResolveGameMetadata(rawGame) ?? rawGame;
+            if (IsGameAlreadyRunning(resolved)) return;
+
+            string exeName = Path.GetFileName((resolved.exe ?? "").Trim().Trim('"', '\''));
+            if (string.IsNullOrEmpty(exeName)) exeName = GameDatabase.InferExecutableFromName(resolved.name ?? "Game");
+            if (exeName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return;
+            if (!exeName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) exeName += ".exe";
+
+            string displayName = !string.IsNullOrWhiteSpace(resolved.name) ? resolved.name.Trim() : FormatDisplayName(exeName);
+            string iconId = resolved.id ?? "";
+            string iconHash = resolved.icon ?? "";
+
+            string relativeExePath = !string.IsNullOrEmpty(resolved.executable_path) ? resolved.executable_path : exeName;
+            relativeExePath = GameDatabase.NormalizeExecutablePath(relativeExePath);
+            if (relativeExePath == null || !string.Equals(Path.GetFileName(relativeExePath), exeName, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show("This game's executable path is invalid. Refresh its metadata or edit the custom game.", "Launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            string sessionDir = Path.Combine(Path.GetTempPath(), "DiscordDummyTools", Guid.NewGuid().ToString("N"));
+            string targetExePath = Path.Combine(sessionDir, relativeExePath);
+            string tempDir = Path.GetDirectoryName(targetExePath);
+            try { Directory.CreateDirectory(tempDir); }
+            catch (Exception ex)
+            {
+                Program.LogError("CreateExtraHelperDirectory", ex);
+                MessageBox.Show("Could not create the helper directory:\n" + ex.Message, "Launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            string currentExePath = !string.IsNullOrEmpty(originalLauncherPath) && File.Exists(originalLauncherPath)
+                ? originalLauncherPath : Application.ExecutablePath;
+            string mode = Program.GetLaunchMode();
+            string helperMode = mode == "classic" ? "behind" : mode;
+            int myPid = Process.GetCurrentProcess().Id;
+            int locX = this.Location.X;
+            int locY = this.Location.Y;
+            string safeName = (displayName ?? "").Replace("\"", "'");
+            GameItem running = new GameItem
+            {
+                id = iconId,
+                name = displayName,
+                icon = iconHash,
+                exe = exeName,
+                executable_path = resolved.executable_path
+            };
+
+            isLaunchingExtra = true;
+            UpdateMultiInstanceLayout();
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                Process started = null;
+                string error = null;
+                try
+                {
+                    File.Copy(currentExePath, targetExePath, false);
+                    ProcessStartInfo psi = new ProcessStartInfo();
+                    psi.FileName = targetExePath;
+                    psi.Arguments = string.Format("--dummy {0} \"{1}\" \"{2}\" \"{3}\" {4} {5} {6}",
+                        myPid, safeName, iconId, iconHash, helperMode, locX, locY);
+                    psi.UseShellExecute = true;
+                    psi.WorkingDirectory = Path.GetDirectoryName(targetExePath);
+                    started = Process.Start(psi);
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                }
+
+                try
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        isLaunchingExtra = false;
+                        if (!isSimulatingMode || this.IsDisposed || started == null)
+                        {
+                            try { if (started != null && !started.HasExited) started.Kill(); } catch { }
+                            if (started != null) started.Dispose();
+                            ScheduleTempCleanup(targetExePath);
+                            UpdateMultiInstanceLayout();
+                            if (started == null && !this.IsDisposed && isSimulatingMode)
+                            {
+                                MessageBox.Show("Failed to start dummy executable:\n" + (error ?? "unknown error"), "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                            return;
+                        }
+
+                        ExtraGameInstance inst = new ExtraGameInstance();
+                        inst.Game = running;
+                        inst.DummyProcess = started;
+                        inst.DummyExePath = targetExePath;
+                        inst.DummyMode = helperMode;
+                        inst.DummyHwnd = IntPtr.Zero;
+                        inst.Stopwatch = Stopwatch.StartNew();
+                        extraInstances.Add(inst);
+                        StartExtraDiscordRpc(inst);
+                        UpdateMultiInstanceLayout();
+                        RefreshQueueStrip();
+                        UpdateTrayContextMenu();
+                        SyncDummyWindow();
+                    }));
+                }
+                catch
+                {
+                    try { if (started != null && !started.HasExited) started.Kill(); } catch { }
+                    if (started != null) started.Dispose();
+                    ScheduleTempCleanup(targetExePath);
+                }
+            });
+        }
+
+        // Keep the real (visible) game window(s) underneath this launcher window.
+        private void SyncDummyWindow()
+        {
+            if (!this.IsHandleCreated) return;
+            bool visible = this.Visible && this.WindowState != FormWindowState.Minimized;
+            SyncSingleHelperWindow(dummyProcess, ref dummyHwnd, dummyMode, visible);
+            for (int i = 0; i < extraInstances.Count; i++)
+            {
+                ExtraGameInstance inst = extraInstances[i];
+                IntPtr hwnd = inst.DummyHwnd;
+                SyncSingleHelperWindow(inst.DummyProcess, ref hwnd, inst.DummyMode, visible);
+                inst.DummyHwnd = hwnd;
+            }
+        }
+
+        private void SyncSingleHelperWindow(Process proc, ref IntPtr hwnd, string mode, bool visible)
+        {
+            if (proc == null || (mode != "behind" && mode != "single") || !this.IsHandleCreated) return;
+            try
+            {
+                if (hwnd == IntPtr.Zero)
+                {
+                    proc.Refresh();
+                    hwnd = proc.MainWindowHandle;
+                    if (hwnd == IntPtr.Zero) hwnd = Program.FindProcessWindow(proc.Id);
+                    if (hwnd == IntPtr.Zero) return;
+                }
+                if (!visible)
+                {
+                    if (Program.IsWindowVisible(hwnd)) Program.ShowWindow(hwnd, 0);
+                    return;
+                }
+                if (!Program.IsWindowVisible(hwnd) || Program.IsIconic(hwnd))
+                    Program.ShowWindow(hwnd, 4); // SW_SHOWNOACTIVATE
+                Program.PlaceBelow(hwnd, this.Handle, this.Location.X, this.Location.Y);
             }
             catch { }
         }
@@ -4074,14 +5543,8 @@ namespace DiscordQuestLauncher
             SyncDummyWindow();
         }
 
-        private void KillDummy()
+        private static void TerminateProcessAndCleanup(Process p, string path)
         {
-            Process p = dummyProcess;
-            string path = dummyExePath;
-            dummyProcess = null;
-            dummyExePath = null;
-            dummyHwnd = IntPtr.Zero;
-
             if (p != null)
             {
                 try
@@ -4097,6 +5560,57 @@ namespace DiscordQuestLauncher
             }
 
             if (!string.IsNullOrEmpty(path)) ScheduleTempCleanup(path);
+        }
+
+        private void KillDummy()
+        {
+            Process p = dummyProcess;
+            string path = dummyExePath;
+            dummyProcess = null;
+            dummyExePath = null;
+            dummyHwnd = IntPtr.Zero;
+            TerminateProcessAndCleanup(p, path);
+        }
+
+        private void KillAllExtraDummies()
+        {
+            for (int i = extraInstances.Count - 1; i >= 0; i--)
+            {
+                ExtraGameInstance inst = extraInstances[i];
+                StopExtraDiscordRpc(inst);
+                if (inst.Stopwatch != null) inst.Stopwatch.Stop();
+                TryRecordExtraSession(inst);
+                TerminateProcessAndCleanup(inst.DummyProcess, inst.DummyExePath);
+                inst.DummyProcess = null;
+                inst.DummyExePath = null;
+                inst.DummyHwnd = IntPtr.Zero;
+            }
+            extraInstances.Clear();
+        }
+
+        private void StopExtraSimulation(ExtraGameInstance inst, bool showSaveError)
+        {
+            if (inst == null) return;
+            extraInstances.Remove(inst);
+            StopExtraDiscordRpc(inst);
+            if (inst.Stopwatch != null) inst.Stopwatch.Stop();
+            bool recorded = TryRecordExtraSession(inst);
+            if (!recorded && showSaveError)
+                MessageBox.Show("Could not save this session. See launcher.log for details.", "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            TerminateProcessAndCleanup(inst.DummyProcess, inst.DummyExePath);
+            inst.DummyProcess = null;
+            inst.DummyExePath = null;
+            inst.DummyHwnd = IntPtr.Zero;
+            UpdateMultiInstanceLayout();
+            RefreshQueueStrip();
+            UpdateTrayContextMenu();
+            RefreshSwitcherList();
+        }
+
+        private void StopAllSimulations()
+        {
+            KillAllExtraDummies();
+            StopSimulation();
         }
 
         private void StartRunningState(GameItem game)
@@ -4134,12 +5648,27 @@ namespace DiscordQuestLauncher
             timerUIUpdate.Start();
 
             StartDiscordRpc(game != null ? game.id : "", currentDisplayName, game != null ? game.icon : "");
+            UpdateMultiInstanceLayout();
+            RefreshQueueStrip();
             RefreshDiscordStatus();
             UpdateTrayContextMenu();
         }
 
         private void StopSimulation()
         {
+            if (isQueueRunning)
+            {
+                isQueueRunning = false;
+                queuePhase = QueuePhase.Idle;
+                if (queueBreakStopwatch != null) queueBreakStopwatch.Stop();
+                queueBreakStopwatch = null;
+                queueBreakTargetSeconds = 0;
+                for (int i = 0; i < queueItems.Count; i++)
+                {
+                    if (queueItems[i].State == QueueItemState.Running) queueItems[i].State = QueueItemState.Pending;
+                }
+                queueActiveIndex = -1;
+            }
             StopDiscordRpc();
             KillDummy();
             if (sessionStopwatch != null) sessionStopwatch.Stop();
@@ -4149,6 +5678,7 @@ namespace DiscordQuestLauncher
 
             if (recorded && !string.IsNullOrEmpty(originalLauncherPath) && File.Exists(originalLauncherPath))
             {
+                KillAllExtraDummies();
                 isSwitchingProcesses = true;
                 if (trayIcon != null)
                 {
@@ -4166,9 +5696,51 @@ namespace DiscordQuestLauncher
                 ScheduleTempCleanup(Application.ExecutablePath);
                 this.Close();
             }
+            else if (extraInstances.Count > 0)
+            {
+                ExtraGameInstance next = extraInstances[0];
+                extraInstances.RemoveAt(0);
+                StopExtraDiscordRpc(next);
+
+                activeSimulatingGame = next.Game;
+                selectedGame = next.Game;
+                currentDisplayName = next.Game != null ? next.Game.name : "Game";
+                currentExeName = next.Game != null ? next.Game.exe : "game.exe";
+                dummyProcess = next.DummyProcess;
+                dummyExePath = next.DummyExePath;
+                dummyMode = next.DummyMode;
+                dummyHwnd = next.DummyHwnd;
+                sessionStopwatch = next.Stopwatch ?? Stopwatch.StartNew();
+                qualificationFinalRecorded = next.QualificationFinalRecorded;
+                hasSaved2MinQualification = sessionStopwatch.Elapsed.TotalSeconds >= 120;
+
+                this.Text = currentDisplayName;
+                Program.SetWindowText(this.Handle, currentDisplayName);
+                if (heroControl != null)
+                {
+                    heroControl.SetGame(next.Game, false);
+                    heroControl.IsRunning = true;
+                }
+                if (btnAction != null)
+                {
+                    TimeSpan elapsed = sessionStopwatch.Elapsed;
+                    btnAction.ActionText = "Stop";
+                    btnAction.TimerText = string.Format("{0:00}:{1:00}:{2:00}", (int)elapsed.TotalHours, elapsed.Minutes, elapsed.Seconds);
+                    btnAction.SetRunningState(true);
+                }
+
+                StartDiscordRpc(next.Game != null ? next.Game.id : "", currentDisplayName, next.Game != null ? next.Game.icon : "");
+                UpdateMultiInstanceLayout();
+                RefreshQueueStrip();
+                RefreshDiscordStatus();
+                UpdateTrayContextMenu();
+                RefreshSwitcherList();
+                SyncDummyWindow();
+            }
             else
             {
                 isSimulatingMode = false;
+                CloseExtraGamePicker();
                 switcherControl.Enabled = true;
                 if (sessionStopwatch != null) sessionStopwatch.Stop();
                 timerUIUpdate.Stop();
@@ -4183,8 +5755,11 @@ namespace DiscordQuestLauncher
                     btnAction.ActionText = "Launch";
                     btnAction.TimerText = "";
                     btnAction.SetRunningState(false);
+                    UpdateIdleActionButton();
                 }
 
+                RefreshQueueStrip();
+                UpdateMultiInstanceLayout();
                 UpdateTrayContextMenu();
                 RefreshSwitcherList();
                 RefreshDiscordStatus();
@@ -4196,6 +5771,14 @@ namespace DiscordQuestLauncher
             if (qualificationFinalRecorded || sessionStopwatch == null || sessionStopwatch.Elapsed.TotalSeconds < 120 || activeSimulatingGame == null) return true;
             qualificationFinalRecorded = GameDatabase.Instance.RecordQualifiedGame(activeSimulatingGame, (int)sessionStopwatch.Elapsed.TotalSeconds);
             return qualificationFinalRecorded;
+        }
+
+        private bool TryRecordExtraSession(ExtraGameInstance inst)
+        {
+            if (inst == null || inst.QualificationFinalRecorded || inst.Stopwatch == null ||
+                inst.Stopwatch.Elapsed.TotalSeconds < 120 || inst.Game == null) return true;
+            inst.QualificationFinalRecorded = GameDatabase.Instance.RecordQualifiedGame(inst.Game, (int)inst.Stopwatch.Elapsed.TotalSeconds);
+            return inst.QualificationFinalRecorded;
         }
 
         private void OnUITick(object sender, EventArgs e)
@@ -4213,6 +5796,20 @@ namespace DiscordQuestLauncher
                 }
             }
 
+            if (isSimulatingMode && extraInstances.Count > 0)
+            {
+                for (int i = extraInstances.Count - 1; i >= 0; i--)
+                {
+                    ExtraGameInstance inst = extraInstances[i];
+                    if (inst.DummyProcess != null)
+                    {
+                        bool extraDead = false;
+                        try { extraDead = inst.DummyProcess.HasExited; } catch { extraDead = true; }
+                        if (extraDead) StopExtraSimulation(inst, false);
+                    }
+                }
+            }
+
             if (isSimulatingMode && sessionStopwatch != null)
             {
                 TimeSpan elapsed = sessionStopwatch.Elapsed;
@@ -4221,6 +5818,55 @@ namespace DiscordQuestLauncher
                 {
                     btnAction.TimerText = timerStr;
                 }
+            }
+
+            if (isQueueRunning && queuePhase == QueuePhase.PlayingGame && isSimulatingMode &&
+                sessionStopwatch != null && queueActiveIndex >= 0 && queueActiveIndex < queueItems.Count)
+            {
+                if (sessionStopwatch.Elapsed.TotalSeconds >= queueItems[queueActiveIndex].PlannedPlaySeconds)
+                {
+                    AdvanceQueueFromGameComplete();
+                    return;
+                }
+                RefreshQueueStrip();
+            }
+            else if (isQueueRunning && queuePhase == QueuePhase.BreakCooldown)
+            {
+                double elapsedBreak = queueBreakStopwatch != null ? queueBreakStopwatch.Elapsed.TotalSeconds : queueBreakTargetSeconds;
+                if (elapsedBreak >= queueBreakTargetSeconds)
+                {
+                    if (queueBreakStopwatch != null) queueBreakStopwatch.Stop();
+                    queueBreakStopwatch = null;
+                    queueActiveIndex++;
+                    if (queueActiveIndex < queueItems.Count)
+                    {
+                        queuePhase = QueuePhase.PlayingGame;
+                        queueItems[queueActiveIndex].State = QueueItemState.Running;
+                        GameItem nextGame = queueItems[queueActiveIndex].Game;
+                        SelectGame(nextGame);
+                        RefreshQueueStrip();
+                        UpdateMultiInstanceLayout();
+                        UpdateTrayContextMenu();
+                        LaunchSimulation(nextGame.exe);
+                    }
+                    else
+                    {
+                        StopQueue();
+                    }
+                    return;
+                }
+                int rem = Math.Max(0, queueBreakTargetSeconds - (int)Math.Floor(elapsedBreak));
+                if (btnAction != null) btnAction.TimerText = string.Format("{0:00}:{1:00}", rem / 60, rem % 60);
+                RefreshQueueStrip();
+            }
+
+            if (isSimulatingMode && extraStripControl != null && extraStripControl.Visible)
+            {
+                extraStripControl.RefreshTooltip();
+            }
+            if (isSimulatingMode && !isQueueRunning && extraInstances.Count > 0 && queueStripControl != null && queueStripControl.Visible)
+            {
+                queueStripControl.RefreshTooltip();
             }
         }
 
@@ -4233,6 +5879,24 @@ namespace DiscordQuestLauncher
                     hasSaved2MinQualification = true;
                     timerQualification.Stop();
                 }
+            }
+        }
+
+        private static void RunRpcWorkerLoop(DiscordRpcClient client, ManualResetEvent stop, string appName, string iconHash, Action<bool, string> onPoll)
+        {
+            long startEpoch = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+            while (!stop.WaitOne(0))
+            {
+                bool accepted = false;
+                try
+                {
+                    if (!client.IsConnected) client.Connect(1000);
+                    if (!stop.WaitOne(0) && client.IsConnected)
+                        accepted = client.SetActivity(appName, "In Game", iconHash, appName, startEpoch);
+                }
+                catch (Exception ex) { Program.LogError("RpcWorker", ex); }
+                if (onPoll != null) onPoll(accepted, client.LastError);
+                if (stop.WaitOne(accepted ? 15000 : 3000)) break;
             }
         }
 
@@ -4257,19 +5921,10 @@ namespace DiscordQuestLauncher
                 rpcStop = stop;
                 rpcThread = new Thread(() =>
                 {
-                    long startEpoch = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
                     try
                     {
-                        while (!stop.WaitOne(0))
+                        RunRpcWorkerLoop(client, stop, appName, iconHash, (accepted, lastError) =>
                         {
-                            bool accepted = false;
-                            try
-                            {
-                                if (!client.IsConnected) client.Connect(1000);
-                                if (!stop.WaitOne(0) && client.IsConnected)
-                                    accepted = client.SetActivity(appName, "In Game", iconHash, appName, startEpoch);
-                            }
-                            catch (Exception ex) { Program.LogError("RpcWorker", ex); }
                             lock (_rpcLock)
                             {
                                 if (!stop.WaitOne(0) && object.ReferenceEquals(rpcClient, client))
@@ -4277,11 +5932,10 @@ namespace DiscordQuestLauncher
                                     string status = accepted ? "Discord activity acknowledged" : "Discord activity unavailable — retrying";
                                     if (rpcStatus != status) Program.LogError("RpcStatus", new Exception(status));
                                     rpcStatus = status;
-                                    rpcStatusDetail = accepted ? "Discord accepted the activity display. Quest credit remains unverified." : client.LastError ?? "Discord did not acknowledge the activity update.";
+                                    rpcStatusDetail = accepted ? "Discord accepted the activity display. Quest credit remains unverified." : lastError ?? "Discord did not acknowledge the activity update.";
                                 }
                             }
-                            if (stop.WaitOne(accepted ? 15000 : 3000)) break;
-                        }
+                        });
                     }
                     finally
                     {
@@ -4324,13 +5978,84 @@ namespace DiscordQuestLauncher
             if (worker != null && worker != Thread.CurrentThread && worker.IsAlive) worker.Join(400);
         }
 
+        private void StartExtraDiscordRpc(ExtraGameInstance inst)
+        {
+            if (inst == null || inst.Game == null || string.IsNullOrWhiteSpace(inst.Game.id)) return;
+            StopExtraDiscordRpc(inst);
+            lock (inst.RpcLock)
+            {
+                int activityPid = inst.DummyProcess == null ? Process.GetCurrentProcess().Id : inst.DummyProcess.Id;
+                DiscordRpcClient client = new DiscordRpcClient(inst.Game.id, activityPid);
+                ManualResetEvent stop = new ManualResetEvent(false);
+                inst.RpcClient = client;
+                inst.RpcStop = stop;
+                string appName = inst.Game.name ?? "Game";
+                string iconHash = inst.Game.icon ?? "";
+                inst.RpcThread = new Thread(() =>
+                {
+                    try
+                    {
+                        RunRpcWorkerLoop(client, stop, appName, iconHash, null);
+                    }
+                    finally
+                    {
+                        client.Dispose();
+                        lock (inst.RpcLock)
+                        {
+                            if (object.ReferenceEquals(inst.RpcClient, client))
+                            {
+                                inst.RpcClient = null;
+                                inst.RpcThread = null;
+                                inst.RpcStop = null;
+                            }
+                        }
+                        stop.Dispose();
+                    }
+                });
+                inst.RpcThread.IsBackground = true;
+                inst.RpcThread.Name = "DiscordRpcExtraWorker";
+                inst.RpcThread.Start();
+            }
+        }
+
+        private void StopExtraDiscordRpc(ExtraGameInstance inst)
+        {
+            if (inst == null) return;
+            Thread worker;
+            DiscordRpcClient client;
+            lock (inst.RpcLock)
+            {
+                if (inst.RpcStop != null) inst.RpcStop.Set();
+                worker = inst.RpcThread;
+                client = inst.RpcClient;
+                inst.RpcThread = null;
+                inst.RpcClient = null;
+                inst.RpcStop = null;
+            }
+            if (client != null) client.Dispose();
+            if (worker != null && worker != Thread.CurrentThread && worker.IsAlive) worker.Join(400);
+        }
+
         private void RefreshDiscordStatus()
         {
             if (lblDiscordStatus == null) return;
-            string text = rpcStatus + "\nLocal timer; quest progress is unverified.";
+            string text;
+            string tip;
+            if (isQueueRunning && queuePhase == QueuePhase.BreakCooldown)
+            {
+                string nextName = (queueActiveIndex + 1 < queueItems.Count && queueItems[queueActiveIndex + 1].Game != null)
+                    ? queueItems[queueActiveIndex + 1].Game.name : "next game";
+                text = "Queue break — next: " + nextName + "\nWaiting before launching next game.";
+                tip = "Random cooldown between queued games.";
+            }
+            else
+            {
+                text = rpcStatus + "\nLocal timer; quest progress is unverified.";
+                tip = rpcStatusDetail;
+            }
             if (lblDiscordStatus.Text != text) lblDiscordStatus.Text = text;
-            if (globalToolTip.GetToolTip(lblDiscordStatus) != rpcStatusDetail)
-                globalToolTip.SetToolTip(lblDiscordStatus, rpcStatusDetail);
+            if (globalToolTip.GetToolTip(lblDiscordStatus) != tip)
+                globalToolTip.SetToolTip(lblDiscordStatus, tip);
         }
 
         private void UpdateTrayContextMenu()
@@ -4341,12 +6066,43 @@ namespace DiscordQuestLauncher
             menu.ForeColor = Theme.TextPrimary;
             menu.ShowImageMargin = false;
 
-            if (isSimulatingMode)
+            if (isQueueRunning && queuePhase == QueuePhase.BreakCooldown)
             {
-                ToolStripMenuItem showItem = new ToolStripMenuItem("Show " + currentDisplayName, null, (s, e) => RestoreFromTray());
+                ToolStripMenuItem showItem = new ToolStripMenuItem("Show (Queue Break)", null, (s, e) => RestoreFromTray());
                 showItem.Font = FontManager.ButtonFont;
                 menu.Items.Add(showItem);
-                menu.Items.Add("Stop", null, (s, e) => StopSimulation());
+                menu.Items.Add("Stop Queue", null, (s, e) => StopQueue());
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add("Exit", null, (s, e) => ExitApplication());
+            }
+            else if (isQueueRunning && isSimulatingMode)
+            {
+                ToolStripMenuItem showItem = new ToolStripMenuItem("Show " + currentDisplayName + " (Queue)", null, (s, e) => RestoreFromTray());
+                showItem.Font = FontManager.ButtonFont;
+                menu.Items.Add(showItem);
+                menu.Items.Add("Stop Queue", null, (s, e) => StopQueue());
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add("Exit", null, (s, e) => ExitApplication());
+            }
+            else if (isSimulatingMode)
+            {
+                string showLabel = extraInstances.Count > 0
+                    ? "Show (" + (1 + extraInstances.Count) + " running)"
+                    : "Show " + currentDisplayName;
+                ToolStripMenuItem showItem = new ToolStripMenuItem(showLabel, null, (s, e) => RestoreFromTray());
+                showItem.Font = FontManager.ButtonFont;
+                menu.Items.Add(showItem);
+                menu.Items.Add("Stop " + currentDisplayName, null, (s, e) => StopSimulation());
+                for (int i = 0; i < extraInstances.Count; i++)
+                {
+                    ExtraGameInstance extra = extraInstances[i];
+                    string extraName = extra.Game != null && !string.IsNullOrEmpty(extra.Game.name) ? extra.Game.name : "Game";
+                    menu.Items.Add("Stop " + extraName, null, (s, e) => StopExtraSimulation(extra, true));
+                }
+                if (extraInstances.Count > 0)
+                {
+                    menu.Items.Add("Stop All", null, (s, e) => StopAllSimulations());
+                }
                 menu.Items.Add(new ToolStripSeparator());
                 menu.Items.Add("Exit", null, (s, e) => ExitApplication());
             }
@@ -4406,12 +6162,9 @@ namespace DiscordQuestLauncher
         {
             if (!isExplicitExit && !isSwitchingProcesses && e.CloseReason != CloseReason.WindowsShutDown && e.CloseReason != CloseReason.ApplicationExitCall)
             {
-                if (minimizeToTrayEnabled)
-                {
-                    e.Cancel = true;
-                    MinimizeToTray();
-                    return;
-                }
+                e.Cancel = true;
+                MinimizeToTray();
+                return;
             }
 
             base.OnFormClosing(e);
@@ -4423,8 +6176,11 @@ namespace DiscordQuestLauncher
                 return;
             }
             if (sessionStopwatch != null) sessionStopwatch.Stop();
+            if (queueBreakStopwatch != null) queueBreakStopwatch.Stop();
+            isQueueRunning = false;
             StopDiscordRpc();
             KillDummy();
+            KillAllExtraDummies();
             GameDatabase.Instance.OnDatabaseUpdated -= OnDatabaseLoaded;
             GameDatabase.Instance.OnQualifiedGamesChanged -= OnQualifiedGamesUpdated;
             GameDatabase.Instance.OnInitializationCompleted -= OnDatabaseLoaded;
@@ -4434,6 +6190,7 @@ namespace DiscordQuestLauncher
             if (timerUIUpdate != null) { timerUIUpdate.Stop(); timerUIUpdate.Dispose(); }
             if (timerHoverCheck != null) { timerHoverCheck.Stop(); timerHoverCheck.Dispose(); }
             if (debounceSearchTimer != null) { debounceSearchTimer.Stop(); debounceSearchTimer.Dispose(); }
+            if (debounceExtraSearchTimer != null) { debounceExtraSearchTimer.Stop(); debounceExtraSearchTimer.Dispose(); }
 
             if (isSimulatingMode && !isSwitchingProcesses)
             {
@@ -4566,22 +6323,18 @@ namespace DiscordQuestLauncher
 
             bool hClose = CloseRect.Contains(e.Location);
             bool hMin = MinimizeRect.Contains(e.Location);
-            bool hTray = TrayBtnRect.Contains(e.Location);
             bool hAdd = AddBtnRect.Contains(e.Location);
 
-            if (hClose != _isHoveringClose || hMin != _isHoveringMinimize ||
-                hTray != _isHoveringTrayBtn || hAdd != _isHoveringAddBtn)
+            if (hClose != _isHoveringClose || hMin != _isHoveringMinimize || hAdd != _isHoveringAddBtn)
             {
                 _isHoveringClose = hClose;
                 _isHoveringMinimize = hMin;
-                _isHoveringTrayBtn = hTray;
                 _isHoveringAddBtn = hAdd;
 
-                if (hClose || hMin || hTray || hAdd)
+                if (hClose || hMin || hAdd)
                 {
                     this.Cursor = Cursors.Hand;
-                    if (hTray && globalToolTip != null) globalToolTip.SetToolTip(this, minimizeToTrayEnabled ? "Tray On" : "Tray Off");
-                    else if (hAdd && globalToolTip != null) globalToolTip.SetToolTip(this, "Add Game");
+                    if (hAdd && globalToolTip != null) globalToolTip.SetToolTip(this, "Add Game");
                     else if (globalToolTip != null) globalToolTip.SetToolTip(this, "");
                 }
                 else
@@ -4602,7 +6355,6 @@ namespace DiscordQuestLauncher
                 _isMouseInWindow = false;
                 _isHoveringClose = false;
                 _isHoveringMinimize = false;
-                _isHoveringTrayBtn = false;
                 _isHoveringAddBtn = false;
                 this.Cursor = Cursors.Default;
                 Invalidate();
@@ -4617,8 +6369,7 @@ namespace DiscordQuestLauncher
                 // Top-right window controls (visible on window hover)
                 if (CloseRect.Contains(e.Location))
                 {
-                    if (minimizeToTrayEnabled) MinimizeToTray();
-                    else this.Close();
+                    MinimizeToTray();
                     return;
                 }
 
@@ -4628,14 +6379,7 @@ namespace DiscordQuestLauncher
                     return;
                 }
 
-                // Footer Buttons
-                if (TrayBtnRect.Contains(e.Location))
-                {
-                    minimizeToTrayEnabled = !minimizeToTrayEnabled;
-                    Invalidate();
-                    return;
-                }
-
+                // Footer Button
                 if (AddBtnRect.Contains(e.Location))
                 {
                     ShowAddCustomGameDialog("");
@@ -4681,24 +6425,7 @@ namespace DiscordQuestLauncher
                 }
             }
 
-            // Footer buttons:
-            // Left = tray toggle, Right = add custom game (+). Active state shown by color only, never by text.
-            Color trayColor = minimizeToTrayEnabled ? Theme.AccentViolet : (_isHoveringTrayBtn ? Theme.TextPrimary : Theme.TextMuted);
-            using (Pen trayPen = new Pen(trayColor, 1.6f))
-            {
-                int tx = TrayBtnRect.X + 3;
-                int ty = TrayBtnRect.Y + 3;
-                // Tray basin
-                g.DrawLine(trayPen, tx, ty + 8, tx, ty + 13);
-                g.DrawLine(trayPen, tx, ty + 13, tx + 14, ty + 13);
-                g.DrawLine(trayPen, tx + 14, ty + 13, tx + 14, ty + 8);
-                // Down arrow
-                g.DrawLine(trayPen, tx + 7, ty + 2, tx + 7, ty + 8);
-                g.DrawLine(trayPen, tx + 4, ty + 5, tx + 7, ty + 8);
-                g.DrawLine(trayPen, tx + 10, ty + 5, tx + 7, ty + 8);
-            }
-
-            // Right = Add custom game (+)
+            // Footer button: Add custom game (+)
             Color addColor = _isHoveringAddBtn ? Theme.TextPrimary : Theme.TextMuted;
             using (Pen addPen = new Pen(addColor, 1.8f))
             {
