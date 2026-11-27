@@ -16,6 +16,12 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+// FileDescription/ProductName must equal the repo name (GloriaSetup release check, and what
+// Windows shows in Task Manager and the taskbar).
+[assembly: System.Reflection.AssemblyTitle("FakeGameLauncher")]
+[assembly: System.Reflection.AssemblyProduct("FakeGameLauncher")]
+[assembly: System.Reflection.AssemblyCompany("Project Gloria")]
+
 namespace DiscordQuestLauncher
 {
     public static class Program
